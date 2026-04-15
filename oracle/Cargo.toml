@@ -1,0 +1,17 @@
+[package]
+name = "rveevr-oracle"
+version = "0.0.0"
+edition = "2021"
+authors = ["wesley <wesley@bitechular.com>"]
+description = "Dev-only FFI wrapper around rcheevos used as a differential-test oracle for rveevr. Never shipped in production."
+license = "MIT"
+publish = false
+links = "rcheevos"
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]

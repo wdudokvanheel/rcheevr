@@ -1,0 +1,3 @@
+[submodule "oracle/vendor/rcheevos"]
+	path = oracle/vendor/rcheevos
+	url = https://github.com/RetroAchievements/rcheevos
