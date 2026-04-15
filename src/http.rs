@@ -171,6 +171,61 @@ impl HttpTransport for MockTransport {
 }
 
 // ---------------------------------------------------------------------------
+// ReqwestTransport
+// ---------------------------------------------------------------------------
+
+/// Blocking HTTP transport backed by [`reqwest::blocking::Client`].
+///
+/// Compiled only when the `http-reqwest` feature is enabled.
+#[cfg(feature = "http-reqwest")]
+pub struct ReqwestTransport {
+    client: reqwest::blocking::Client,
+}
+
+#[cfg(feature = "http-reqwest")]
+impl ReqwestTransport {
+    /// Build a new transport with a default reqwest client.
+    pub fn new() -> Result<Self, TransportError> {
+        let client = reqwest::blocking::Client::builder()
+            .build()
+            .map_err(|e| TransportError::Network(e.to_string()))?;
+        Ok(Self { client })
+    }
+
+    /// Wrap an existing `reqwest::blocking::Client` (useful for tests that
+    /// want custom timeouts, certificates, etc.).
+    pub fn from_client(client: reqwest::blocking::Client) -> Self {
+        Self { client }
+    }
+}
+
+#[cfg(feature = "http-reqwest")]
+impl HttpTransport for ReqwestTransport {
+    fn post_form(&mut self, url: &str, form: &[(&str, &str)]) -> Result<Vec<u8>, TransportError> {
+        let resp = self
+            .client
+            .post(url)
+            .form(form)
+            .send()
+            .map_err(|e| TransportError::Network(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(TransportError::Status(status.as_u16()));
+        }
+        resp.bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| TransportError::Network(e.to_string()))
+    }
+}
+
+#[cfg(feature = "http-reqwest")]
+impl Default for ReqwestTransport {
+    fn default() -> Self {
+        Self::new().expect("reqwest client build")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -304,5 +359,16 @@ mod tests {
         let bytes = t.post_form("http://example.com/login2", &[]).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["Token"], "tok");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9 (http-reqwest feature only): ReqwestTransport::new() succeeds.
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "http-reqwest")]
+    #[test]
+    fn reqwest_transport_new_does_not_panic() {
+        let _t = super::ReqwestTransport::new()
+            .expect("ReqwestTransport::new() should succeed");
     }
 }
