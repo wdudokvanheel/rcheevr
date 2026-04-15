@@ -1,0 +1,17 @@
+[package]
+name = "rveevr"
+version = "0.0.0"
+edition = "2021"
+authors = ["wesley <wesley@bitechular.com>"]
+description = "Pure-Rust RetroAchievements client: memaddr parser, condition evaluator, rich presence, leaderboards, web API."
+license = "MIT"
+publish = false
+
+[features]
+default = []
+http-reqwest = []
+http-fetch = []
+
+[dependencies]
+
+[dev-dependencies]
