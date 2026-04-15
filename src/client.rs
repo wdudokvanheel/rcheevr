@@ -101,8 +101,19 @@ impl<H: HttpTransport> AchievementRuntime<H> {
         self.hardcore
     }
 
+    /// Flip hardcore mode. If the new value differs from the current one, the
+    /// session and loaded game are dropped so the app must re-login and
+    /// re-load the ROM — matching RA's own behavior, since `startsession` must
+    /// be re-issued under the new hardcore flag to register the mode switch
+    /// server-side.
     pub fn set_hardcore(&mut self, on: bool) {
+        if self.hardcore == on {
+            return;
+        }
         self.hardcore = on;
+        self.session = None;
+        self.game = None;
+        self.events.clear();
     }
 
     pub fn loaded_game(&self) -> Option<&LoadedGame> {
@@ -803,6 +814,44 @@ mod tests {
         rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 });
 
         rt.http.assert_called("", &[("r", "awardachievement"), ("h", "1")]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10b: flipping hardcore mid-session drops session and game.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_hardcore_mid_session_drops_state() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        queue_load_rom(&mut t, 42, patch_json_one_ach());
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.login_password("testuser", "pass").unwrap();
+        rt.load_rom(b"rom").unwrap();
+        assert!(rt.session().is_some());
+        assert!(rt.loaded_game().is_some());
+
+        rt.set_hardcore(true);
+        assert!(rt.session().is_none(), "session should be dropped on hardcore flip");
+        assert!(rt.loaded_game().is_none(), "loaded game should be dropped on hardcore flip");
+        assert!(rt.hardcore());
+    }
+
+    #[test]
+    fn set_hardcore_no_change_preserves_state() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        queue_load_rom(&mut t, 42, patch_json_one_ach());
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.login_password("testuser", "pass").unwrap();
+        rt.load_rom(b"rom").unwrap();
+
+        // Setting the same value is a no-op — don't drop state.
+        rt.set_hardcore(false);
+        assert!(rt.session().is_some());
+        assert!(rt.loaded_game().is_some());
     }
 
     // -----------------------------------------------------------------------
