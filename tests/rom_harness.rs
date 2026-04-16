@@ -1,0 +1,431 @@
+//! ROM integration harness for rveevr.
+//!
+//! Boots a real Game Boy ROM in the emulator, wires up `AchievementRuntime`
+//! with a `MockTransport` serving crafted achievement conditions, and verifies
+//! that achievements trigger (or don't) based on actual emulator memory state.
+//!
+//! Set `TEST_ROM_GB` to the path of a `.gb` ROM to run these tests:
+//!
+//! ```text
+//! TEST_ROM_GB=../gameboy-emulator/resources/roms/test/pokemon-red.gb \
+//!     cargo test --test rom_harness -- --nocapture
+//! ```
+//!
+//! Tests are skipped (pass with a log message) when `TEST_ROM_GB` is unset.
+
+use gameboy_emulator::gameboy::{detect_device_model, GameBoy};
+use rveevr::client::AchievementRuntime;
+use rveevr::events::AchievementEvent;
+use rveevr::http::MockTransport;
+use rveevr::memaddr::MemSize;
+use serde_json::json;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Load the ROM at `$TEST_ROM_GB`. Returns `None` when the env var is unset.
+fn load_test_rom() -> Option<Vec<u8>> {
+    let path = std::env::var("TEST_ROM_GB").ok()?;
+    Some(std::fs::read(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}")))
+}
+
+macro_rules! require_rom {
+    () => {
+        match load_test_rom() {
+            Some(r) => r,
+            None => {
+                eprintln!("TEST_ROM_GB not set — skipping");
+                return;
+            }
+        }
+    };
+}
+
+/// Build a `MockTransport` pre-seeded with the login / gameid / patch /
+/// startsession flow.  After those 4 expectations are consumed any further
+/// calls (awardachievement, ping) return empty bytes — the runtime handles
+/// that gracefully.
+fn mock_with_patch(
+    achievements: serde_json::Value,
+    leaderboards: serde_json::Value,
+    rich_presence: &str,
+) -> MockTransport {
+    let mut mock = MockTransport::new();
+    mock.strict = false;
+
+    mock.expect_json("", &[("r", "login2")], json!({
+        "Success": true,
+        "User": "tester",
+        "Token": "TOKEN",
+        "DisplayName": "tester",
+        "Score": 0,
+        "SoftcoreScore": 0,
+        "Messages": 0,
+        "Permissions": 0
+    }));
+
+    mock.expect_json("", &[("r", "gameid")], json!({
+        "Success": true,
+        "GameID": 1
+    }));
+
+    mock.expect_json("", &[("r", "patch")], json!({
+        "Success": true,
+        "Title": "Harness ROM",
+        "ImageIcon": "",
+        "ConsoleID": 4,
+        "RichPresencePatch": rich_presence,
+        "Achievements": achievements,
+        "Leaderboards": leaderboards
+    }));
+
+    mock.expect_json("", &[("r", "startsession")], json!({
+        "Success": true,
+        "HardcoreUnlocks": [],
+        "Unlocks": [],
+        "ServerNow": 0
+    }));
+
+    mock
+}
+
+/// Shorthand: mock with achievements only, no leaderboards.
+fn mock_with_achievements(achievements: serde_json::Value) -> MockTransport {
+    mock_with_patch(achievements, json!([]), "Display:\nPlaying")
+}
+
+fn runtime_with(mock: MockTransport) -> AchievementRuntime<MockTransport> {
+    AchievementRuntime::with_base_url(mock, "http://mock".to_string())
+}
+
+fn boot_gb(rom: &[u8]) -> GameBoy {
+    let model = detect_device_model(rom);
+    let mut gb = GameBoy::new(model);
+    gb.load_rom(rom);
+    gb
+}
+
+/// Peek closure that wires the emulator bus into rveevr's address space.
+/// Identical to the one used in portacore-desktop / portacore-wasm.
+fn peek_bus(gb: &GameBoy, addr: u32, size: MemSize) -> u32 {
+    let bytes: u32 = match size {
+        MemSize::Byte
+        | MemSize::LowNibble
+        | MemSize::HighNibble
+        | MemSize::BitCount
+        | MemSize::Bit0
+        | MemSize::Bit1
+        | MemSize::Bit2
+        | MemSize::Bit3
+        | MemSize::Bit4
+        | MemSize::Bit5
+        | MemSize::Bit6
+        | MemSize::Bit7 => 1,
+        MemSize::Word | MemSize::BigEndianWord => 2,
+        MemSize::ThreeBytes | MemSize::BigEndianThreeBytes => 3,
+        _ => 4,
+    };
+    let mut val: u32 = 0;
+    for i in 0..bytes {
+        let a = addr.wrapping_add(i) as u16;
+        val |= (gb.bus.peek(a) as u32) << (8 * i);
+    }
+    val
+}
+
+/// Run `n` frames, collecting all events.
+fn run_frames(
+    gb: &mut GameBoy,
+    rt: &mut AchievementRuntime<MockTransport>,
+    n: usize,
+) -> Vec<AchievementEvent> {
+    let mut all = Vec::new();
+    for _ in 0..n {
+        gb.run_frame();
+        rt.peek_from(|addr, size| peek_bus(gb, addr, size));
+        all.extend(rt.drain_events());
+    }
+    all
+}
+
+/// Extract Unlocked achievement IDs from an event list.
+fn unlocked_ids(events: &[AchievementEvent]) -> Vec<u32> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AchievementEvent::Unlocked { id, .. } => Some(*id),
+            _ => None,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Achievement JSON helpers
+// ---------------------------------------------------------------------------
+
+fn ach(id: u32, title: &str, memaddr: &str, points: u32) -> serde_json::Value {
+    json!({
+        "ID": id,
+        "Title": title,
+        "Description": "",
+        "Points": points,
+        "MemAddr": memaddr,
+        "Flags": 3,
+        "Author": "harness",
+        "BadgeName": "00001"
+    })
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 1. ROM header constant triggers immediately
+//
+// Address 0x0104 is the first byte of the Nintendo logo in every valid GB
+// ROM. Its value is 0xCE (206 decimal) before the game's boot sequence runs
+// DMA. This fires on frame 1 (well before DMA kicks in).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn immediate_trigger_rom_header() {
+    let rom = require_rom!();
+
+    let mock = mock_with_achievements(json!([
+        ach(1001, "ROM Header", "0xH0104=206", 5)
+    ]));
+
+    let mut rt = runtime_with(mock);
+    rt.login_password("tester", "pw").unwrap();
+    rt.load_rom(&rom).unwrap();
+
+    let mut gb = boot_gb(&rom);
+    let events = run_frames(&mut gb, &mut rt, 1);
+
+    assert_eq!(unlocked_ids(&events), vec![1001]);
+}
+
+// ---------------------------------------------------------------------------
+// 2. Hit-count condition delays trigger
+//
+// Uses `1=1` (constant self-equality) which is always true regardless of
+// DMA state or memory mapping. With a hit target of 50 it fires on frame 50.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hit_count_delays_trigger() {
+    let rom = require_rom!();
+
+    let mock = mock_with_achievements(json!([
+        ach(1002, "Fifty Frames", "1=1(50)", 10)
+    ]));
+
+    let mut rt = runtime_with(mock);
+    rt.login_password("tester", "pw").unwrap();
+    rt.load_rom(&rom).unwrap();
+
+    let mut gb = boot_gb(&rom);
+
+    // 49 frames — should not fire yet.
+    let early = run_frames(&mut gb, &mut rt, 49);
+    assert!(unlocked_ids(&early).is_empty(), "should not trigger before frame 50");
+
+    // Frame 50 — fires.
+    let frame50 = run_frames(&mut gb, &mut rt, 1);
+    assert_eq!(unlocked_ids(&frame50), vec![1002], "should trigger on frame 50");
+}
+
+// ---------------------------------------------------------------------------
+// 3. Impossible condition never fires
+//
+// 1=0 — constant inequality, never true.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn impossible_condition_never_fires() {
+    let rom = require_rom!();
+
+    let mock = mock_with_achievements(json!([
+        ach(1003, "Impossible", "1=0", 50)
+    ]));
+
+    let mut rt = runtime_with(mock);
+    rt.login_password("tester", "pw").unwrap();
+    rt.load_rom(&rom).unwrap();
+
+    let mut gb = boot_gb(&rom);
+    let events = run_frames(&mut gb, &mut rt, 300);
+
+    assert!(unlocked_ids(&events).is_empty(), "impossible condition must never fire");
+}
+
+// ---------------------------------------------------------------------------
+// 4. Emulator WRAM write detected
+//
+// 0xHC000>0 — first byte of WRAM. On boot, WRAM is zeroed. Once the game
+// initialises it writes to WRAM, making this condition true.  We run 600
+// frames (~10 seconds of game time) which is enough for any commercial ROM
+// to write to 0xC000.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wram_write_detected() {
+    let rom = require_rom!();
+
+    let mock = mock_with_achievements(json!([
+        ach(1004, "WRAM Init", "0xHC000>0", 5)
+    ]));
+
+    let mut rt = runtime_with(mock);
+    rt.login_password("tester", "pw").unwrap();
+    rt.load_rom(&rom).unwrap();
+
+    let mut gb = boot_gb(&rom);
+    let events = run_frames(&mut gb, &mut rt, 600);
+
+    assert_eq!(
+        unlocked_ids(&events),
+        vec![1004],
+        "game should write to WRAM within 600 frames"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5. Delta detection — memory value changes between frames
+//
+// d0xHC000!=0xHC000 — fires when the previous frame's value at 0xC000
+// differs from the current frame's value.  On frame 1, delta is the initial
+// value (0); once the game writes a new value the condition triggers.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn delta_detects_memory_change() {
+    let rom = require_rom!();
+
+    let mock = mock_with_achievements(json!([
+        ach(1005, "Memory Changed", "d0xHC000!=0xHC000", 5)
+    ]));
+
+    let mut rt = runtime_with(mock);
+    rt.login_password("tester", "pw").unwrap();
+    rt.load_rom(&rom).unwrap();
+
+    let mut gb = boot_gb(&rom);
+    let events = run_frames(&mut gb, &mut rt, 600);
+
+    assert!(
+        !unlocked_ids(&events).is_empty(),
+        "delta condition should fire once the game writes to 0xC000"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. Multiple achievements with staggered triggers
+//
+// Two achievements: one fires immediately (`1=1` with no hit target), one
+// fires on frame 60 (`1=1(60)`). Both use DMA-safe constant comparisons.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn multiple_achievements_staggered() {
+    let rom = require_rom!();
+
+    let mock = mock_with_achievements(json!([
+        ach(1006, "Instant",  "1=1",      5),
+        ach(1007, "Delayed",  "1=1(60)",  10)
+    ]));
+
+    let mut rt = runtime_with(mock);
+    rt.login_password("tester", "pw").unwrap();
+    rt.load_rom(&rom).unwrap();
+
+    let mut gb = boot_gb(&rom);
+
+    // Frame 1 — only the instant achievement fires.
+    let frame1 = run_frames(&mut gb, &mut rt, 1);
+    assert_eq!(unlocked_ids(&frame1), vec![1006]);
+
+    // Frames 2..59 — delayed should not fire yet.
+    let mid = run_frames(&mut gb, &mut rt, 58);
+    assert!(unlocked_ids(&mid).is_empty(), "delayed should not fire before frame 60");
+
+    // Frame 60 — delayed fires.
+    let frame60 = run_frames(&mut gb, &mut rt, 1);
+    assert_eq!(unlocked_ids(&frame60), vec![1007], "delayed should trigger on frame 60");
+}
+
+// ---------------------------------------------------------------------------
+// 7. No re-award on subsequent frames
+//
+// After an achievement fires, it must not fire again even if the condition
+// remains true.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn no_re_award() {
+    let rom = require_rom!();
+
+    let mock = mock_with_achievements(json!([
+        ach(1008, "Once Only", "0xH0104=206", 5)
+    ]));
+
+    let mut rt = runtime_with(mock);
+    rt.login_password("tester", "pw").unwrap();
+    rt.load_rom(&rom).unwrap();
+
+    let mut gb = boot_gb(&rom);
+
+    let first = run_frames(&mut gb, &mut rt, 1);
+    assert_eq!(unlocked_ids(&first), vec![1008]);
+
+    // 200 more frames — must not re-award.
+    let rest = run_frames(&mut gb, &mut rt, 200);
+    assert!(
+        unlocked_ids(&rest).is_empty(),
+        "achievement must not re-award after initial trigger"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 8. Rich presence renders
+//
+// A simple RP script that reads a memory value. After enough frames the
+// rendered string should be non-empty.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rich_presence_renders() {
+    let rom = require_rom!();
+
+    let rp = "Display:\nPlaying Test ROM";
+    let mock = mock_with_patch(json!([]), json!([]), rp);
+
+    let mut rt = runtime_with(mock);
+    rt.login_password("tester", "pw").unwrap();
+    rt.load_rom(&rom).unwrap();
+
+    let mut gb = boot_gb(&rom);
+    let _ = run_frames(&mut gb, &mut rt, 10);
+
+    assert_eq!(rt.rich_presence(), "Playing Test ROM");
+}
+
+// ---------------------------------------------------------------------------
+// 9. ROM hash is deterministic
+//
+// hash_gb on the same ROM data always returns the same 32-char hex string.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rom_hash_deterministic() {
+    let rom = require_rom!();
+
+    let h1 = rveevr::hash::hash_gb(&rom);
+    let h2 = rveevr::hash::hash_gb(&rom);
+
+    assert_eq!(h1, h2);
+    assert_eq!(h1.len(), 32, "MD5 hex string should be 32 chars");
+    assert!(h1.chars().all(|c| c.is_ascii_hexdigit()), "should be hex");
+}

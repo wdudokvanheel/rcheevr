@@ -27,3 +27,4 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 [dev-dependencies]
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+gameboy-emulator = { path = "../gameboy-emulator/cores/gb" }
