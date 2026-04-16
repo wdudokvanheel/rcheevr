@@ -210,8 +210,9 @@ fn immediate_trigger_rom_header() {
 // ---------------------------------------------------------------------------
 // 2. Hit-count condition delays trigger
 //
-// Uses `1=1` (constant self-equality) which is always true regardless of
-// DMA state or memory mapping. With a hit target of 50 it fires on frame 50.
+// 0xH0104=206(50) — ROM header byte is always 0xCE. With the peek fix
+// (no DMA/VRAM blocking), this is true every frame. Hit target 50 fires
+// on exactly frame 50.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -219,7 +220,7 @@ fn hit_count_delays_trigger() {
     let rom = require_rom!();
 
     let mock = mock_with_achievements(json!([
-        ach(1002, "Fifty Frames", "1=1(50)", 10)
+        ach(1002, "Fifty Frames", "0xH0104=206(50)", 10)
     ]));
 
     let mut rt = runtime_with(mock);
@@ -240,7 +241,7 @@ fn hit_count_delays_trigger() {
 // ---------------------------------------------------------------------------
 // 3. Impossible condition never fires
 //
-// 1=0 — constant inequality, never true.
+// 0xH0104=0 — the Nintendo logo byte is 0xCE, never 0.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -248,7 +249,7 @@ fn impossible_condition_never_fires() {
     let rom = require_rom!();
 
     let mock = mock_with_achievements(json!([
-        ach(1003, "Impossible", "1=0", 50)
+        ach(1003, "Impossible", "0xH0104=0", 50)
     ]));
 
     let mut rt = runtime_with(mock);
@@ -264,10 +265,9 @@ fn impossible_condition_never_fires() {
 // ---------------------------------------------------------------------------
 // 4. Emulator WRAM write detected
 //
-// 0xHC000>0 — first byte of WRAM. On boot, WRAM is zeroed. Once the game
-// initialises it writes to WRAM, making this condition true.  We run 600
-// frames (~10 seconds of game time) which is enough for any commercial ROM
-// to write to 0xC000.
+// 0xHC001>0 — second byte of WRAM. On boot, WRAM is zeroed. Pokemon Red
+// writes to 0xC001 within the first ~100 frames during initialisation.
+// We run 600 frames to give any commercial ROM plenty of time.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -275,7 +275,7 @@ fn wram_write_detected() {
     let rom = require_rom!();
 
     let mock = mock_with_achievements(json!([
-        ach(1004, "WRAM Init", "0xHC000>0", 5)
+        ach(1004, "WRAM Init", "0xHC001>0", 5)
     ]));
 
     let mut rt = runtime_with(mock);
@@ -295,9 +295,9 @@ fn wram_write_detected() {
 // ---------------------------------------------------------------------------
 // 5. Delta detection — memory value changes between frames
 //
-// d0xHC000!=0xHC000 — fires when the previous frame's value at 0xC000
-// differs from the current frame's value.  On frame 1, delta is the initial
-// value (0); once the game writes a new value the condition triggers.
+// d0xHC001!=0xHC001 — fires when the previous frame's value at 0xC001
+// differs from the current frame's value. Once the game writes a non-zero
+// value the condition triggers.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -305,7 +305,7 @@ fn delta_detects_memory_change() {
     let rom = require_rom!();
 
     let mock = mock_with_achievements(json!([
-        ach(1005, "Memory Changed", "d0xHC000!=0xHC000", 5)
+        ach(1005, "Memory Changed", "d0xHC001!=0xHC001", 5)
     ]));
 
     let mut rt = runtime_with(mock);
@@ -317,15 +317,15 @@ fn delta_detects_memory_change() {
 
     assert!(
         !unlocked_ids(&events).is_empty(),
-        "delta condition should fire once the game writes to 0xC000"
+        "delta condition should fire once the game writes to 0xC001"
     );
 }
 
 // ---------------------------------------------------------------------------
 // 6. Multiple achievements with staggered triggers
 //
-// Two achievements: one fires immediately (`1=1` with no hit target), one
-// fires on frame 60 (`1=1(60)`). Both use DMA-safe constant comparisons.
+// Two achievements: one fires immediately (ROM header, no hit count), one
+// fires on frame 60 (ROM header with hit count 60).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -333,8 +333,8 @@ fn multiple_achievements_staggered() {
     let rom = require_rom!();
 
     let mock = mock_with_achievements(json!([
-        ach(1006, "Instant",  "1=1",      5),
-        ach(1007, "Delayed",  "1=1(60)",  10)
+        ach(1006, "Instant",  "0xH0104=206",      5),
+        ach(1007, "Delayed",  "0xH0104=206(60)",  10)
     ]));
 
     let mut rt = runtime_with(mock);
