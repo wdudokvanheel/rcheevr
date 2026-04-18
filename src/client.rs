@@ -165,7 +165,7 @@ impl<H: HttpTransport> AchievementRuntime<H> {
             .ok_or_else(|| RuntimeError::InvalidResponse("missing login data".to_string()))?;
 
         *session_slot = Some(Session {
-            user: data.display_name.clone(),
+            user: data.display_name.unwrap_or_else(|| data.user.clone()),
             token: data.token.clone(),
             score: data.score,
             softcore_score: data.softcore_score,
@@ -694,7 +694,11 @@ mod tests {
         rt.login_password("testuser", "pass").unwrap();
         rt.load_rom(b"rom").unwrap();
 
-        // Frame 1: mem[0xc0] = 1 → achievement triggers.
+        // Frame 1: all zeros — exits WAITING state (condition not met).
+        rt.peek_from(|_, _| 0);
+        assert!(rt.drain_events().next().is_none());
+
+        // Frame 2: mem[0xc0] = 1 → achievement triggers.
         rt.peek_from(|addr, _size| if addr == 0xc0 { 1 } else { 0 });
 
         let events: Vec<_> = rt.drain_events().collect();
@@ -724,11 +728,15 @@ mod tests {
         rt.login_password("testuser", "pass").unwrap();
         rt.load_rom(b"rom").unwrap();
 
-        // Frame 1: triggers.
+        // Frame 1: all zeros — exits WAITING state.
+        rt.peek_from(|_, _| 0);
+        let _ = rt.drain_events().count();
+
+        // Frame 2: triggers.
         rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 });
         let _ = rt.drain_events().count();
 
-        // Frame 2: same memory state — must NOT award again.
+        // Frame 3: same memory state — must NOT award again.
         rt.http.strict = false; // allow extra unmatched calls without panicking
         rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 });
         let events: Vec<_> = rt.drain_events().collect();
@@ -811,6 +819,9 @@ mod tests {
         rt.login_password("testuser", "pass").unwrap();
         rt.load_rom(b"rom").unwrap();
 
+        // Frame 1: all zeros — exits WAITING state.
+        rt.peek_from(|_, _| 0);
+        // Frame 2: triggers.
         rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 });
 
         rt.http.assert_called("", &[("r", "awardachievement"), ("h", "1")]);
@@ -881,11 +892,16 @@ mod tests {
         rt.login_password("testuser", "pass").unwrap();
         rt.load_rom(b"rom").unwrap();
 
+        // Frame 1: all zeros — exits WAITING state.
+        rt.peek_from(|_, _| 0);
+        let _ = rt.drain_events().count();
+
+        // Frame 2: triggers.
         rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 });
         let count1 = rt.drain_events().count();
         assert!(count1 > 0);
 
-        // Second drain should be empty.
+        // Third drain should be empty.
         let count2 = rt.drain_events().count();
         assert_eq!(count2, 0);
     }

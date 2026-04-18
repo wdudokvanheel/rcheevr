@@ -48,6 +48,8 @@ pub struct CondsetState {
     pub measured: u32,
     /// Target for Measured progress.
     pub measured_target: u32,
+    /// Last computed value from eval_value (returned when paused).
+    pub last_val_result: i64,
 }
 
 /// Full achievement mutable state.
@@ -60,6 +62,14 @@ pub struct AchievementState {
     /// True when the achievement has passed core+alts but is waiting for the
     /// Trigger-flagged condition to fire.
     pub waiting_for_trigger_flag: bool,
+    /// WAITING state: starts true for a fresh achievement. While waiting, the
+    /// evaluator processes conditions and accumulates hit counts normally, but
+    /// will NOT trigger. The first frame where the achievement would NOT
+    /// trigger transitions from WAITING to ACTIVE (`waiting = false`). This
+    /// matches rcheevos' anti-auto-trigger behaviour — achievements that are
+    /// trivially true at boot cannot fire until they've been false at least
+    /// once.
+    pub waiting: bool,
 }
 
 impl AchievementState {
@@ -77,7 +87,7 @@ impl AchievementState {
                 ..Default::default()
             })
             .collect();
-        Self { core, alts, triggered: false, waiting_for_trigger_flag: false }
+        Self { core, alts, triggered: false, waiting_for_trigger_flag: false, waiting: true }
     }
 }
 
@@ -116,20 +126,20 @@ pub fn eval_achievement<F: FnMut(u32, MemSize) -> u32>(
 
     // ------------------------------------------------------------------
     // Global reset propagation: if any condset emitted a reset signal,
-    // zero all hit counts across the whole achievement.
+    // zero all hit counts across the whole achievement and prevent
+    // triggering this frame (matches rcheevos: was_reset takes priority
+    // over ret). In WAITING state, stay WAITING.
     // ------------------------------------------------------------------
     let any_reset = state.core.did_reset || state.alts.iter().any(|s| s.did_reset);
     if any_reset {
         reset_all_hits(state);
+        return false;
     }
 
     // ------------------------------------------------------------------
     // Determine whether the achievement should trigger this frame.
     // ------------------------------------------------------------------
 
-    // Re-read core_satisfied after possible reset (if core reset, condset
-    // won't be satisfied on this frame anyway since hits were just cleared,
-    // but re-check to be safe).
     let core_ok = state.core.triggered;
 
     let alts_ok = if a.alts.is_empty() {
@@ -138,7 +148,24 @@ pub fn eval_achievement<F: FnMut(u32, MemSize) -> u32>(
         state.alts.iter().any(|s| s.triggered)
     };
 
-    if core_ok && alts_ok {
+    let would_trigger = core_ok && alts_ok;
+
+    if state.waiting {
+        if would_trigger {
+            // Conditions are trivially satisfied — stay WAITING and reset
+            // all hit counts (matches rcheevos: rc_reset_trigger called in
+            // WAITING state when ret=true). This prevents hit inflation
+            // while the achievement waits for conditions to become false.
+            reset_all_hits(state);
+        } else {
+            // First frame where the trigger is NOT satisfied — arm it.
+            // Hit counts are preserved (matching rcheevos).
+            state.waiting = false;
+        }
+        return false;
+    }
+
+    if would_trigger {
         state.triggered = true;
         state.waiting_for_trigger_flag = false;
         true
@@ -162,10 +189,8 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
     // Per-frame accumulators (reset at start of each condset evaluation).
     // ------------------------------------------------------------------
 
-    // Running sum for AddSource / SubSource chains.
-    let mut add_accum: i64 = 0;
-    // Modifier op to apply to the accumulator contribution from this row.
-    let _add_op: CompareOp = CompareOp::None;
+    // Running sum for AddSource / SubSource chains (typed to support float promotion).
+    let mut add_accum = Accum::Int(0);
     // True as long as the AndNext chain is passing.
     let mut and_next: bool = true;
     // True once an OrNext arm has been seen and is passing.
@@ -186,7 +211,6 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
     // PauseIf itself can have a hit target; if so it pauses only after
     // that many frames of being true.
     // ------------------------------------------------------------------
-    let was_paused = state.is_paused;
     let mut new_paused = false;
     for (i, cond) in condset.conditions.iter().enumerate() {
         if cond.flag != ConditionFlag::PauseIf {
@@ -196,22 +220,34 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
         // Always peek the raw current memory so delta/prior state stays accurate.
         let raw_current = peek_current(&cond.lhs, indirect_offset, peek);
         let prev_lhs = raw_current.map_or(0, |curr| update_delta(cs, curr));
-        let lhs_val = resolve_comparison_lhs(&cond.lhs, cs, prev_lhs, indirect_offset, peek);
+        let lhs_val = resolve_comparison_lhs(&cond.lhs, cs, prev_lhs, indirect_offset, TypedValue::Unsigned(0), peek);
         let rhs_val = read_operand_static(&cond.rhs, peek);
-        let passes = compare(lhs_val, cond.op, rhs_val);
+        let passes = lhs_val.typed_compare(cond.op, rhs_val);
         if passes {
             if cond.required_hits == 0 {
                 new_paused = true;
             } else {
                 // PauseIf with hit target: pause once hit count reaches target.
-                // Advance hit count only if not already paused.
-                if !was_paused {
+                // Hit count increments unconditionally when condition is true,
+                // matching rcheevos (rc_condset_evaluate_condition increments
+                // current_hits regardless of pause state). Stops incrementing
+                // once target is met (line 450-452 in condset.c).
+                if cs.hit_count < cond.required_hits {
                     cs.hit_count += 1;
                 }
                 if cs.hit_count >= cond.required_hits {
                     new_paused = true;
                 }
             }
+        } else if cond.required_hits == 0 {
+            // PauseIf without hit target: reset hit count when condition is
+            // false (matches rcheevos condset.c:522-524).
+            cs.hit_count = 0;
+        } else if cs.hit_count >= cond.required_hits {
+            // In rcheevos, once PauseIf's hit count reaches the target it
+            // stays paused even when the condition is no longer true. Only
+            // a ResetIf can clear the hit count and unpause.
+            new_paused = true;
         }
     }
     state.is_paused = new_paused;
@@ -219,7 +255,28 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
 
     if state.is_paused {
         // When paused, do not advance any hit counts (including ResetIf).
-        // Mark condset as not triggered.
+        // However, we MUST still update delta/prior for all non-PauseIf
+        // conditions so they stay current. In rcheevos, memref values are
+        // updated globally (rc_update_trigger_memrefs) before condset
+        // evaluation, so all delta/prior state remains accurate regardless
+        // of pause. Our per-condition delta tracking needs this explicit
+        // update to avoid stale deltas after unpause.
+        //
+        // PauseIf conditions were already updated in Phase 1.
+        for (i, cond) in condset.conditions.iter().enumerate() {
+            if cond.flag == ConditionFlag::PauseIf {
+                continue;
+            }
+            let cs = &mut state.cond_states[i];
+            // Peek with indirect_offset=0: correct for non-AddAddress
+            // conditions. AddAddress-dependent addresses will peek the
+            // base address, which is close enough (AddAddress + delta is
+            // extremely rare in practice and rcheevos' modified memrefs
+            // handle it differently anyway).
+            if let Some(curr) = peek_current(&cond.lhs, 0, peek) {
+                update_delta(cs, curr);
+            }
+        }
         state.triggered = false;
         return false;
     }
@@ -238,10 +295,25 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             if cond.flag == ConditionFlag::ResetNextIf {
                 let cs = &state.cond_states[i];
                 // For the pre-scan we only need the current comparison value.
-                let lhs_val = resolve_comparison_lhs_static(&cond.lhs, cs, indirect_offset, peek);
+                let lhs_val = resolve_comparison_lhs_static(&cond.lhs, cs, indirect_offset, TypedValue::Unsigned(0), peek);
                 let rhs_val = read_operand_static(&cond.rhs, peek);
-                if compare(lhs_val, cond.op, rhs_val) && i + 1 < n {
-                    reset_next_set[i + 1] = true;
+                if lhs_val.typed_compare(cond.op, rhs_val) {
+                    // In rcheevos, reset_next passes through modifier
+                    // conditions (AddSource, SubSource, AddAddress, Remember)
+                    // and is consumed by the next evaluable condition.
+                    let mut j = i + 1;
+                    while j < n {
+                        match condset.conditions[j].flag {
+                            ConditionFlag::AddSource
+                            | ConditionFlag::SubSource
+                            | ConditionFlag::AddAddress
+                            | ConditionFlag::Remember => { j += 1; }
+                            _ => break,
+                        }
+                    }
+                    if j < n {
+                        reset_next_set[j] = true;
+                    }
                 }
             }
             i += 1;
@@ -257,7 +329,7 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
     let mut all_satisfied = true;
     let mut has_trigger = false;
     let mut trigger_satisfied = true;
-    let mut _remember_val: u32 = 0; // TODO: Recall/Remember register (single slot)
+    let mut remember_val = TypedValue::Unsigned(0); // Recall/Remember register (typed)
 
     let n = condset.conditions.len();
     let mut i = 0;
@@ -265,8 +337,10 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
         let cond = &condset.conditions[i];
         let cs = &mut state.cond_states[i];
 
-        // Apply ResetNextIf: zero this condition's hit count.
-        if reset_next_set[i] {
+        // Apply ResetNextIf: zero this condition's hit count AND force the
+        // condition false for this frame (matching rcheevos: cond_valid = 0).
+        let forced_false = reset_next_set[i];
+        if forced_false {
             cs.hit_count = 0;
         }
 
@@ -276,10 +350,10 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
         // (which is the correct "delta" comparison value for this frame).
         let prev_lhs = raw_current.map_or(0, |curr| update_delta(cs, curr));
         // Step 3: Resolve the actual comparison value from the operand kind.
-        let raw_lhs = resolve_comparison_lhs(&cond.lhs, cs, prev_lhs, indirect_offset, peek);
+        let raw_lhs = resolve_comparison_lhs(&cond.lhs, cs, prev_lhs, indirect_offset, remember_val, peek);
         // RHS uses the same condition state so that Delta/Prior on the RHS
         // (e.g. `0xH0000>d0xH0000`) returns the correct previous-frame value.
-        let raw_rhs = read_operand_rhs(&cond.rhs, cs, prev_lhs, peek);
+        let raw_rhs = read_operand_rhs(&cond.rhs, cs, prev_lhs, remember_val, peek);
 
         match cond.flag {
             ConditionFlag::PauseIf => {
@@ -297,8 +371,8 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             // AddSource: accumulate into add_accum, do not compare.
             // ------------------------------------------------------------------
             ConditionFlag::AddSource => {
-                let val = apply_modifier(raw_lhs, cond.op, raw_rhs);
-                add_accum += val as i64;
+                let val = apply_modifier_typed(raw_lhs, cond.op, raw_rhs);
+                add_accum = add_accum.add(val);
                 indirect_offset = 0;
                 i += 1;
                 continue;
@@ -308,8 +382,8 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             // SubSource: subtract from add_accum.
             // ------------------------------------------------------------------
             ConditionFlag::SubSource => {
-                let val = apply_modifier(raw_lhs, cond.op, raw_rhs);
-                add_accum -= val as i64;
+                let val = apply_modifier_typed(raw_lhs, cond.op, raw_rhs);
+                add_accum = add_accum.sub(val);
                 indirect_offset = 0;
                 i += 1;
                 continue;
@@ -319,20 +393,22 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             // AddAddress: accumulate address offset.
             // ------------------------------------------------------------------
             ConditionFlag::AddAddress => {
-                let val = apply_modifier(raw_lhs, cond.op, raw_rhs);
-                indirect_offset = indirect_offset.wrapping_add(val);
+                let val = apply_modifier_typed(raw_lhs, cond.op, raw_rhs);
+                indirect_offset = indirect_offset.wrapping_add(val.to_u32());
                 // Do NOT reset indirect_offset here — it carries forward.
                 i += 1;
                 continue;
             }
 
             // ------------------------------------------------------------------
-            // Remember: store LHS into the remember register.
-            // TODO: Recall operand support is stubbed — the Remember register is
-            // captured but {recall} operands are not yet handled in read_operand.
+            // Remember: store the effective LHS (including AddSource chain)
+            // into the remember register. Read back via {recall} operands.
             // ------------------------------------------------------------------
             ConditionFlag::Remember => {
-                _remember_val = raw_lhs;
+                let effective_lhs = add_accum.apply_to(raw_lhs);
+                add_accum = Accum::Int(0);
+                indirect_offset = 0;
+                remember_val = effective_lhs;
                 i += 1;
                 continue;
             }
@@ -341,10 +417,10 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             // AndNext: fold comparison result into the and_next gate.
             // ------------------------------------------------------------------
             ConditionFlag::AndNext => {
-                let effective_lhs = (raw_lhs as i64 + add_accum) as u32;
-                add_accum = 0;
+                let effective_lhs = add_accum.apply_to(raw_lhs);
+                add_accum = Accum::Int(0);
                 indirect_offset = 0;
-                let passes = compare(effective_lhs, cond.op, raw_rhs);
+                let passes = effective_lhs.typed_compare(cond.op, raw_rhs);
                 if in_or_next {
                     or_next_active = or_next_active || passes;
                 } else {
@@ -359,10 +435,10 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             // OrNext: fold into or_next.
             // ------------------------------------------------------------------
             ConditionFlag::OrNext => {
-                let effective_lhs = (raw_lhs as i64 + add_accum) as u32;
-                add_accum = 0;
+                let effective_lhs = add_accum.apply_to(raw_lhs);
+                add_accum = Accum::Int(0);
                 indirect_offset = 0;
-                let passes = compare(effective_lhs, cond.op, raw_rhs);
+                let passes = effective_lhs.typed_compare(cond.op, raw_rhs);
                 if !in_or_next {
                     // Start of an OrNext chain. The previous and_next result
                     // carries over and the first arm seeds or_next_active.
@@ -379,12 +455,12 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             // AddHits: contribute hits toward shared pool, then continue.
             // ------------------------------------------------------------------
             ConditionFlag::AddHits => {
-                let effective_lhs = (raw_lhs as i64 + add_accum) as u32;
-                add_accum = 0;
+                let effective_lhs = add_accum.apply_to(raw_lhs);
+                add_accum = Accum::Int(0);
                 indirect_offset = 0;
 
-                let cmp = compare(effective_lhs, cond.op, raw_rhs);
-                let passes = apply_gate(cmp, and_next, in_or_next, or_next_active);
+                let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
+                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
                 if passes {
                     cs.hit_count += 1;
@@ -401,12 +477,12 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             // may not match rcheevos exactly in edge cases.
             // ------------------------------------------------------------------
             ConditionFlag::SubHits => {
-                let effective_lhs = (raw_lhs as i64 + add_accum) as u32;
-                add_accum = 0;
+                let effective_lhs = add_accum.apply_to(raw_lhs);
+                add_accum = Accum::Int(0);
                 indirect_offset = 0;
 
-                let cmp = compare(effective_lhs, cond.op, raw_rhs);
-                let passes = apply_gate(cmp, and_next, in_or_next, or_next_active);
+                let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
+                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
                 if passes {
                     cs.hit_count += 1;
@@ -417,15 +493,39 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             }
 
             // ------------------------------------------------------------------
-            // ResetIf: zero all hit counts when true.
+            // ResetIf: zero all hit counts when condition fires.
+            //
+            // Matches rcheevos: ResetIf respects required_hits (hit target).
+            // The condition is gated by AndNext/OrNext chains. Once the hit
+            // target is met, the ResetIf stays active even if the condition
+            // becomes false — only a global reset clears the hit count.
             // ------------------------------------------------------------------
             ConditionFlag::ResetIf => {
-                let effective_lhs = (raw_lhs as i64 + add_accum) as u32;
-                add_accum = 0;
+                let effective_lhs = add_accum.apply_to(raw_lhs);
+                add_accum = Accum::Int(0);
                 indirect_offset = 0;
+
+                let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
+                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
 
-                if compare(effective_lhs, cond.op, raw_rhs) {
+                let fires = if cond.required_hits == 0 {
+                    // No hit target: fire whenever condition passes.
+                    if passes {
+                        cs.hit_count += 1;
+                    }
+                    passes
+                } else {
+                    // Hit target: accumulate hits, fire once target met.
+                    if passes && cs.hit_count < cond.required_hits {
+                        cs.hit_count += 1;
+                    }
+                    // Once met, stays active until a global reset clears hits
+                    // (matches rcheevos: condition false + hits==target → still fires).
+                    cs.hit_count >= cond.required_hits
+                };
+
+                if fires {
                     state.did_reset = true;
                 }
                 i += 1;
@@ -436,12 +536,12 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             // Measured: count hits (or raw value) and expose as progress.
             // ------------------------------------------------------------------
             ConditionFlag::Measured => {
-                let effective_lhs = (raw_lhs as i64 + add_accum) as u32;
-                add_accum = 0;
+                let effective_lhs = add_accum.apply_to(raw_lhs);
+                add_accum = Accum::Int(0);
                 indirect_offset = 0;
 
-                let cmp = compare(effective_lhs, cond.op, raw_rhs);
-                let passes = apply_gate(cmp, and_next, in_or_next, or_next_active);
+                let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
+                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
                 if passes {
                     cs.hit_count += 1;
@@ -455,32 +555,50 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
                         all_satisfied = false;
                     }
                 } else {
-                    // Value mode: measured always satisfies (it reports, not gates).
-                    // A bare `M:0xH0000>=5` with no hit count is always satisfied.
+                    // Value mode: like Standard — condition must be true right now.
+                    // rcheevos calls rc_condset_evaluate_standard for this case.
+                    if !passes {
+                        all_satisfied = false;
+                    }
                 }
                 i += 1;
                 continue;
             }
 
             // ------------------------------------------------------------------
-            // MeasuredIf: gates whether Measured is reported. Does NOT affect
-            // triggering — it only suppresses the measured progress display.
-            // TODO: In rcheevos, if MeasuredIf is false the Measured value is
-            // hidden from the display but the condset can still trigger. We
-            // capture this semantics partially — the `measured` field will still
-            // be updated regardless. A proper implementation would zero
-            // `state.measured` when MeasuredIf fails. Stubbed for now.
+            // MeasuredIf: gates both condset satisfaction AND measured display.
+            //
+            // Matches rcheevos: is_true &= cond_valid, is_primed &= cond_valid,
+            // can_measure &= cond_valid. MeasuredIf participates in hit-count
+            // tracking just like Standard. When false, it prevents the condset
+            // from being satisfied and zeroes the measured display value.
             // ------------------------------------------------------------------
             ConditionFlag::MeasuredIf => {
-                let effective_lhs = (raw_lhs as i64 + add_accum) as u32;
-                add_accum = 0;
+                let effective_lhs = add_accum.apply_to(raw_lhs);
+                add_accum = Accum::Int(0);
                 indirect_offset = 0;
+
+                let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
+                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
 
-                // MeasuredIf does not contribute to satisfied/not-satisfied on its own.
-                // The condition must be true for Measured to be shown; if false
-                // we could zero state.measured but we leave that for a later pass.
-                let _passes = compare(effective_lhs, cond.op, raw_rhs);
+                if passes {
+                    cs.hit_count += 1;
+                }
+
+                // Satisfaction check (like Standard).
+                let satisfied = if cond.required_hits == 0 {
+                    passes
+                } else {
+                    cs.hit_count >= cond.required_hits
+                };
+
+                if !satisfied {
+                    all_satisfied = false;
+                    // Gate measured display: zero the measured value when MeasuredIf fails.
+                    state.measured = 0;
+                }
+
                 i += 1;
                 continue;
             }
@@ -492,12 +610,12 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             // ------------------------------------------------------------------
             ConditionFlag::Trigger => {
                 has_trigger = true;
-                let effective_lhs = (raw_lhs as i64 + add_accum) as u32;
-                add_accum = 0;
+                let effective_lhs = add_accum.apply_to(raw_lhs);
+                add_accum = Accum::Int(0);
                 indirect_offset = 0;
 
-                let cmp = compare(effective_lhs, cond.op, raw_rhs);
-                let passes = apply_gate(cmp, and_next, in_or_next, or_next_active);
+                let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
+                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
                 if passes {
                     if cond.required_hits == 0 {
@@ -522,26 +640,27 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             // Standard: normal comparison condition.
             // ------------------------------------------------------------------
             ConditionFlag::Standard => {
-                let effective_lhs = (raw_lhs as i64 + add_accum) as u32;
-                add_accum = 0;
+                let effective_lhs = add_accum.apply_to(raw_lhs);
+                add_accum = Accum::Int(0);
                 indirect_offset = 0;
 
-                let cmp = compare(effective_lhs, cond.op, raw_rhs);
-                let passes = apply_gate(cmp, and_next, in_or_next, or_next_active);
+                let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
+                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
 
-                // Check if this condition is the target of a pending AddHits pool.
-                // A pool is active if shared_hits_delta != 0 and this is not an
-                // AddHits/SubHits row. We add the shared delta to this condition's
-                // hit count for the purpose of satisfying the target.
+                // Always increment terminal's own hit count when condition
+                // passes — this tracks independently of the AddHits/SubHits
+                // pool (matching rcheevos current_hits semantics).
+                if passes {
+                    cs.hit_count += 1;
+                }
+
+                // Compute effective hits: own count + AddHits/SubHits pool.
                 let effective_hits = if shared_hits_delta != 0 {
                     let total = cs.hit_count as i64 + shared_hits_delta;
                     shared_hits_delta = 0; // pool consumed
                     total.max(0) as u32
                 } else {
-                    if passes {
-                        cs.hit_count += 1;
-                    }
                     cs.hit_count
                 };
 
@@ -553,10 +672,6 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
                 } else {
                     if effective_hits < cond.required_hits {
                         all_satisfied = false;
-                    }
-                    // Keep hit_count in sync with effective (AddHits case).
-                    if shared_hits_delta == 0 {
-                        cs.hit_count = effective_hits;
                     }
                 }
             }
@@ -629,7 +744,8 @@ fn peek_current<F: FnMut(u32, MemSize) -> u32>(
     match op {
         Operand::Memory { size, address, .. } => {
             let addr = address.wrapping_add(indirect_offset);
-            Some(peek(addr, *size))
+            let raw = peek(addr, base_read_size(*size));
+            Some(transform_memref_value(raw, *size))
         }
         _ => None,
     }
@@ -648,27 +764,41 @@ fn resolve_comparison_lhs<F: FnMut(u32, MemSize) -> u32>(
     cs: &ConditionState,
     prev_lhs: u32,
     indirect_offset: u32,
+    remember_val: TypedValue,
     peek: &mut F,
-) -> u32 {
+) -> TypedValue {
     match op {
         Operand::Memory { kind, size, address } => {
             let addr = address.wrapping_add(indirect_offset);
+            let is_float = is_float_size(*size);
             match kind {
-                OperandKind::Address => peek(addr, *size),
-                OperandKind::Delta => prev_lhs,
-                OperandKind::Prior => cs.prior_value,
-                OperandKind::Bcd => bcd_decode(peek(addr, *size)),
-                OperandKind::Inverted => !peek(addr, *size) & size_mask(*size),
-                OperandKind::Recall => {
-                    // TODO: Recall operand reads the Remember register.
-                    // Full implementation requires threading the remember_val;
-                    // stubbed to 0 for now.
-                    0
+                OperandKind::Address => {
+                    let raw = peek(addr, base_read_size(*size));
+                    wrap_value(transform_memref_value(raw, *size), *size)
                 }
+                OperandKind::Delta => {
+                    if is_float { TypedValue::Float(f32::from_bits(prev_lhs)) } else { TypedValue::Unsigned(prev_lhs) }
+                }
+                OperandKind::Prior => {
+                    if is_float { TypedValue::Float(f32::from_bits(cs.prior_value)) } else { TypedValue::Unsigned(cs.prior_value) }
+                }
+                OperandKind::Bcd => {
+                    let raw = peek(addr, base_read_size(*size));
+                    let val = transform_memref_value(raw, *size);
+                    // rcheevos skips BCD for float types
+                    if is_float { TypedValue::Float(f32::from_bits(val)) } else { TypedValue::Unsigned(bcd_decode(val)) }
+                }
+                OperandKind::Inverted => {
+                    let raw = peek(addr, base_read_size(*size));
+                    let val = transform_memref_value(raw, *size);
+                    // rcheevos skips Invert for float types
+                    if is_float { TypedValue::Float(f32::from_bits(val)) } else { TypedValue::Unsigned(!val & size_mask(*size)) }
+                }
+                OperandKind::Recall => remember_val,
             }
         }
-        Operand::ConstInt(v) => *v,
-        Operand::ConstFloat(f) => *f as u32,
+        Operand::ConstInt(v) => TypedValue::Unsigned(*v),
+        Operand::ConstFloat(f) => TypedValue::Float(*f),
     }
 }
 
@@ -678,24 +808,30 @@ fn resolve_comparison_lhs_static<F: FnMut(u32, MemSize) -> u32>(
     op: &Operand,
     cs: &ConditionState,
     indirect_offset: u32,
+    remember_val: TypedValue,
     peek: &mut F,
-) -> u32 {
+) -> TypedValue {
     match op {
         Operand::Memory { kind, size, address } => {
             let addr = address.wrapping_add(indirect_offset);
+            let is_float = is_float_size(*size);
             match kind {
                 OperandKind::Address | OperandKind::Bcd | OperandKind::Inverted => {
-                    peek(addr, *size)
+                    let raw = peek(addr, base_read_size(*size));
+                    wrap_value(transform_memref_value(raw, *size), *size)
                 }
                 OperandKind::Delta => {
-                    if cs.had_sample { cs.last_value } else { 0 }
+                    let v = if cs.had_sample { cs.last_value } else { 0 };
+                    if is_float { TypedValue::Float(f32::from_bits(v)) } else { TypedValue::Unsigned(v) }
                 }
-                OperandKind::Prior => cs.prior_value,
-                OperandKind::Recall => 0,
+                OperandKind::Prior => {
+                    if is_float { TypedValue::Float(f32::from_bits(cs.prior_value)) } else { TypedValue::Unsigned(cs.prior_value) }
+                }
+                OperandKind::Recall => remember_val,
             }
         }
-        Operand::ConstInt(v) => *v,
-        Operand::ConstFloat(f) => *f as u32,
+        Operand::ConstInt(v) => TypedValue::Unsigned(*v),
+        Operand::ConstFloat(f) => TypedValue::Float(*f),
     }
 }
 
@@ -710,33 +846,53 @@ fn read_operand_rhs<F: FnMut(u32, MemSize) -> u32>(
     op: &Operand,
     cs: &ConditionState,
     prev_lhs: u32,
+    remember_val: TypedValue,
     peek: &mut F,
-) -> u32 {
+) -> TypedValue {
     match op {
         Operand::Memory { kind, size, address } => {
             let addr = *address;
+            let is_float = is_float_size(*size);
             match kind {
-                OperandKind::Address => peek(addr, *size),
-                OperandKind::Delta => prev_lhs,
-                OperandKind::Prior => cs.prior_value,
-                OperandKind::Bcd => bcd_decode(peek(addr, *size)),
-                OperandKind::Inverted => !peek(addr, *size) & size_mask(*size),
-                OperandKind::Recall => 0, // TODO
+                OperandKind::Address => {
+                    let raw = peek(addr, base_read_size(*size));
+                    wrap_value(transform_memref_value(raw, *size), *size)
+                }
+                OperandKind::Delta => {
+                    if is_float { TypedValue::Float(f32::from_bits(prev_lhs)) } else { TypedValue::Unsigned(prev_lhs) }
+                }
+                OperandKind::Prior => {
+                    if is_float { TypedValue::Float(f32::from_bits(cs.prior_value)) } else { TypedValue::Unsigned(cs.prior_value) }
+                }
+                OperandKind::Bcd => {
+                    let raw = peek(addr, base_read_size(*size));
+                    let val = transform_memref_value(raw, *size);
+                    if is_float { TypedValue::Float(f32::from_bits(val)) } else { TypedValue::Unsigned(bcd_decode(val)) }
+                }
+                OperandKind::Inverted => {
+                    let raw = peek(addr, base_read_size(*size));
+                    let val = transform_memref_value(raw, *size);
+                    if is_float { TypedValue::Float(f32::from_bits(val)) } else { TypedValue::Unsigned(!val & size_mask(*size)) }
+                }
+                OperandKind::Recall => remember_val,
             }
         }
-        Operand::ConstInt(v) => *v,
-        Operand::ConstFloat(f) => *f as u32,
+        Operand::ConstInt(v) => TypedValue::Unsigned(*v),
+        Operand::ConstFloat(f) => TypedValue::Float(*f),
     }
 }
 
 /// Read an operand when we have no associated condition state.
 /// For memory operands this always reads the current value (no delta/prior).
 /// Used for PauseIf pre-scan and static RHS without delta context.
-fn read_operand_static<F: FnMut(u32, MemSize) -> u32>(op: &Operand, peek: &mut F) -> u32 {
+fn read_operand_static<F: FnMut(u32, MemSize) -> u32>(op: &Operand, peek: &mut F) -> TypedValue {
     match op {
-        Operand::Memory { kind: _, size, address } => peek(*address, *size),
-        Operand::ConstInt(v) => *v,
-        Operand::ConstFloat(f) => *f as u32,
+        Operand::Memory { kind: _, size, address } => {
+            let raw = peek(*address, base_read_size(*size));
+            wrap_value(transform_memref_value(raw, *size), *size)
+        }
+        Operand::ConstInt(v) => TypedValue::Unsigned(*v),
+        Operand::ConstFloat(f) => TypedValue::Float(*f),
     }
 }
 
@@ -812,10 +968,81 @@ fn apply_modifier(value: u32, op: CompareOp, rhs: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Size transformation: raw peek → extracted value
+//
+// Matches rcheevos' rc_transform_memref_value.  The evaluator calls peek with
+// base_read_size (byte-granularity) then applies transform_memref_value to
+// extract sub-byte quantities (nibbles, bits, big-endian byte-swap).
+// ---------------------------------------------------------------------------
+
+/// Map a MemSize to the byte-granularity size the peek should actually read.
+/// Sub-byte sizes (nibbles, bits) map to Byte; big-endian variants map to
+/// their little-endian byte count equivalent.
+pub(crate) fn base_read_size(size: MemSize) -> MemSize {
+    match size {
+        MemSize::LowNibble
+        | MemSize::HighNibble
+        | MemSize::BitCount
+        | MemSize::Bit0
+        | MemSize::Bit1
+        | MemSize::Bit2
+        | MemSize::Bit3
+        | MemSize::Bit4
+        | MemSize::Bit5
+        | MemSize::Bit6
+        | MemSize::Bit7 => MemSize::Byte,
+        MemSize::BigEndianWord => MemSize::Word,
+        MemSize::BigEndianThreeBytes => MemSize::ThreeBytes,
+        MemSize::BigEndianDWord | MemSize::FloatBigEndian | MemSize::Double32BigEndian => {
+            MemSize::DWord
+        }
+        other => other,
+    }
+}
+
+/// Extract the meaningful value from a raw peek result according to MemSize.
+pub(crate) fn transform_memref_value(raw: u32, size: MemSize) -> u32 {
+    match size {
+        // Pass-through: no sub-byte extraction.
+        MemSize::Byte | MemSize::Word | MemSize::ThreeBytes | MemSize::DWord => raw,
+        // IEEE 754 float (LE): raw is already the f32 bit pattern.
+        MemSize::Float => raw,
+        // MBF/Double32 floats: decode to f32 and store as bits.
+        MemSize::MbfFloat => decode_mbf32(raw).to_bits(),
+        MemSize::MbfFloatLittleEndian => decode_mbf32_le(raw).to_bits(),
+        MemSize::Double32 => decode_double32(raw).to_bits(),
+        // Nibbles
+        MemSize::LowNibble => raw & 0x0F,
+        MemSize::HighNibble => (raw >> 4) & 0x0F,
+        // Individual bits
+        MemSize::Bit0 => raw & 1,
+        MemSize::Bit1 => (raw >> 1) & 1,
+        MemSize::Bit2 => (raw >> 2) & 1,
+        MemSize::Bit3 => (raw >> 3) & 1,
+        MemSize::Bit4 => (raw >> 4) & 1,
+        MemSize::Bit5 => (raw >> 5) & 1,
+        MemSize::Bit6 => (raw >> 6) & 1,
+        MemSize::Bit7 => (raw >> 7) & 1,
+        // Popcount of byte
+        MemSize::BitCount => (raw as u8).count_ones(),
+        // Big-endian integer: byte-swap
+        MemSize::BigEndianWord => ((raw >> 8) & 0xFF) | ((raw & 0xFF) << 8),
+        MemSize::BigEndianThreeBytes => {
+            ((raw >> 16) & 0xFF) | (raw & 0xFF00) | ((raw & 0xFF) << 16)
+        }
+        MemSize::BigEndianDWord => raw.swap_bytes(),
+        // Big-endian float: byte-swap gives IEEE 754 LE bits.
+        MemSize::FloatBigEndian => raw.swap_bytes(),
+        // Big-endian double32: byte-swap to LE, then decode.
+        MemSize::Double32BigEndian => decode_double32(raw.swap_bytes()).to_bits(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Size mask (for Inverted operand)
 // ---------------------------------------------------------------------------
 
-fn size_mask(size: MemSize) -> u32 {
+pub(crate) fn size_mask(size: MemSize) -> u32 {
     match size {
         MemSize::Bit0
         | MemSize::Bit1
@@ -844,7 +1071,7 @@ fn size_mask(size: MemSize) -> u32 {
 // BCD decode
 // ---------------------------------------------------------------------------
 
-fn bcd_decode(raw: u32) -> u32 {
+pub(crate) fn bcd_decode(raw: u32) -> u32 {
     // Treat the raw value as packed BCD (each nibble is one decimal digit).
     let d0 = (raw & 0xF) as u32;
     let d1 = ((raw >> 4) & 0xF) as u32;
@@ -862,6 +1089,265 @@ fn bcd_decode(raw: u32) -> u32 {
         + d5 * 100000
         + d6 * 1000000
         + d7 * 10000000
+}
+
+// ---------------------------------------------------------------------------
+// Typed value support (float-aware comparison and accumulation)
+// ---------------------------------------------------------------------------
+
+/// A value tagged with its type. Used for float-aware comparison and
+/// accumulator arithmetic, matching rcheevos' `rc_typed_value_t`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum TypedValue {
+    Unsigned(u32),
+    Float(f32),
+}
+
+impl TypedValue {
+    pub(crate) fn to_u32(self) -> u32 {
+        match self {
+            TypedValue::Unsigned(v) => v,
+            TypedValue::Float(f) => f as u32,
+        }
+    }
+
+    pub(crate) fn to_f32(self) -> f32 {
+        match self {
+            TypedValue::Unsigned(v) => v as f32,
+            TypedValue::Float(f) => f,
+        }
+    }
+
+    pub(crate) fn is_float(self) -> bool {
+        matches!(self, TypedValue::Float(_))
+    }
+
+    pub(crate) fn typed_compare(self, op: CompareOp, other: TypedValue) -> bool {
+        if self.is_float() || other.is_float() {
+            compare_float(self.to_f32(), op, other.to_f32())
+        } else {
+            compare(self.to_u32(), op, other.to_u32())
+        }
+    }
+}
+
+/// Returns true if the MemSize represents a float-decoded value.
+pub(crate) fn is_float_size(size: MemSize) -> bool {
+    matches!(
+        size,
+        MemSize::Float
+            | MemSize::FloatBigEndian
+            | MemSize::MbfFloat
+            | MemSize::MbfFloatLittleEndian
+            | MemSize::Double32
+            | MemSize::Double32BigEndian
+    )
+}
+
+/// Wrap a raw u32 (from transform_memref_value) as a TypedValue.
+pub(crate) fn wrap_value(val: u32, size: MemSize) -> TypedValue {
+    if is_float_size(size) {
+        TypedValue::Float(f32::from_bits(val))
+    } else {
+        TypedValue::Unsigned(val)
+    }
+}
+
+/// Typed accumulator for AddSource/SubSource chains.
+/// Starts as integer, promotes to float when a float value is added.
+#[derive(Clone, Copy)]
+enum Accum {
+    Int(i64),
+    Float(f64),
+}
+
+impl Accum {
+    fn add(self, val: TypedValue) -> Self {
+        match (self, val) {
+            (Accum::Int(acc), TypedValue::Unsigned(v)) => Accum::Int(acc + v as i64),
+            (Accum::Int(acc), TypedValue::Float(f)) => Accum::Float(acc as f64 + f as f64),
+            (Accum::Float(acc), TypedValue::Unsigned(v)) => Accum::Float(acc + v as f64),
+            (Accum::Float(acc), TypedValue::Float(f)) => Accum::Float(acc + f as f64),
+        }
+    }
+
+    fn sub(self, val: TypedValue) -> Self {
+        match (self, val) {
+            (Accum::Int(acc), TypedValue::Unsigned(v)) => Accum::Int(acc - v as i64),
+            (Accum::Int(acc), TypedValue::Float(f)) => Accum::Float(acc as f64 - f as f64),
+            (Accum::Float(acc), TypedValue::Unsigned(v)) => Accum::Float(acc - v as f64),
+            (Accum::Float(acc), TypedValue::Float(f)) => Accum::Float(acc - f as f64),
+        }
+    }
+
+    /// Apply the accumulated offset to a raw LHS value.
+    fn apply_to(self, raw_lhs: TypedValue) -> TypedValue {
+        match self {
+            Accum::Int(0) => raw_lhs,
+            Accum::Int(acc) => match raw_lhs {
+                TypedValue::Unsigned(v) => TypedValue::Unsigned((v as i64 + acc) as u32),
+                TypedValue::Float(f) => TypedValue::Float((f as f64 + acc as f64) as f32),
+            },
+            Accum::Float(acc) => match raw_lhs {
+                TypedValue::Unsigned(v) => TypedValue::Float((v as f64 + acc) as f32),
+                TypedValue::Float(f) => TypedValue::Float((f as f64 + acc) as f32),
+            },
+        }
+    }
+}
+
+/// Apply a modifier operation with typed values. Bitwise ops force unsigned.
+fn apply_modifier_typed(lhs: TypedValue, op: CompareOp, rhs: TypedValue) -> TypedValue {
+    match op {
+        CompareOp::BitwiseAnd | CompareOp::BitwiseXor => {
+            let a = lhs.to_u32();
+            let b = rhs.to_u32();
+            TypedValue::Unsigned(match op {
+                CompareOp::BitwiseAnd => a & b,
+                _ => a ^ b,
+            })
+        }
+        _ => {
+            if lhs.is_float() || rhs.is_float() {
+                let a = lhs.to_f32();
+                let b = rhs.to_f32();
+                TypedValue::Float(match op {
+                    CompareOp::Multiply => a * b,
+                    CompareOp::Divide => {
+                        if b == 0.0 {
+                            0.0
+                        } else {
+                            a / b
+                        }
+                    }
+                    CompareOp::Modulo => {
+                        if b == 0.0 {
+                            0.0
+                        } else {
+                            a % b
+                        }
+                    }
+                    _ => a,
+                })
+            } else {
+                TypedValue::Unsigned(apply_modifier(lhs.to_u32(), op, rhs.to_u32()))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Float comparison with epsilon tolerance (matches rcheevos)
+// ---------------------------------------------------------------------------
+
+/// Compare two f32 values with epsilon tolerance matching rcheevos'
+/// `rc_typed_value_compare_floats`.
+fn compare_float(lhs: f32, op: CompareOp, rhs: f32) -> bool {
+    if lhs == rhs {
+        // exactly equal
+        return matches!(
+            op,
+            CompareOp::Equal | CompareOp::LessOrEqual | CompareOp::GreaterOrEqual
+        );
+    }
+
+    let abs1 = lhs.abs();
+    let abs2 = rhs.abs();
+    let threshold = abs1.min(abs2) * f32::EPSILON;
+    let diff = lhs - rhs;
+
+    if diff.abs() <= threshold {
+        // approximately equal
+        return matches!(
+            op,
+            CompareOp::Equal | CompareOp::LessOrEqual | CompareOp::GreaterOrEqual
+        );
+    }
+
+    if diff > threshold {
+        // lhs > rhs
+        matches!(
+            op,
+            CompareOp::NotEqual | CompareOp::Greater | CompareOp::GreaterOrEqual
+        )
+    } else {
+        // lhs < rhs
+        matches!(
+            op,
+            CompareOp::NotEqual | CompareOp::Less | CompareOp::LessOrEqual
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Float decoders (MBF32, Double32)
+// ---------------------------------------------------------------------------
+
+/// Build a float from 23-bit mantissa, exponent, and sign.
+/// Matches rcheevos' `rc_build_float`.
+fn build_float(mantissa_bits: u32, exponent: i32, sign: bool) -> f32 {
+    let implied_bit: u32 = 1 << 23;
+    let mantissa = mantissa_bits | implied_bit;
+    let mut dbl = mantissa as f64 / implied_bit as f64;
+
+    if exponent > 127 {
+        if mantissa_bits == 0 {
+            dbl = f64::INFINITY;
+        } else {
+            dbl = f64::NAN;
+        }
+    } else if exponent >= 0 {
+        dbl *= (2.0f64).powi(exponent);
+    } else {
+        dbl /= (2.0f64).powi(-exponent);
+    }
+
+    if sign {
+        dbl = -dbl;
+    }
+    dbl as f32
+}
+
+/// Decode the high 32 bits of an IEEE 754 double into f32.
+fn decode_double32(raw: u32) -> f32 {
+    let mantissa = (raw & 0x000FFFFF) << 3;
+    let exponent = ((raw >> 20) & 0x7FF) as i32 - 1023;
+    let sign = (raw & 0x80000000) != 0;
+    build_float(mantissa, exponent, sign)
+}
+
+/// Decode a Microsoft Binary Format 32-bit float (big-endian in memory).
+fn decode_mbf32(raw: u32) -> f32 {
+    let mantissa = ((raw & 0xFF000000) >> 24) | ((raw & 0x00FF0000) >> 8) | ((raw & 0x00007F00) << 8);
+    let exponent = (raw & 0xFF) as i32 - 129;
+    let sign = (raw & 0x00008000) != 0;
+
+    if mantissa == 0 && exponent == -129 {
+        if sign {
+            -0.0
+        } else {
+            0.0
+        }
+    } else {
+        build_float(mantissa, exponent, sign)
+    }
+}
+
+/// Decode a Microsoft Binary Format 32-bit float (little-endian).
+fn decode_mbf32_le(raw: u32) -> f32 {
+    let mantissa = raw & 0x007FFFFF;
+    let exponent = (raw >> 24) as i32 - 129;
+    let sign = (raw & 0x00800000) != 0;
+
+    if mantissa == 0 && exponent == -129 {
+        if sign {
+            -0.0
+        } else {
+            0.0
+        }
+    } else {
+        build_float(mantissa, exponent, sign)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -895,45 +1381,26 @@ mod tests {
             self.0[addr + 1] = b[1];
         }
 
+        /// Return raw little-endian bytes. The evaluator handles sub-byte
+        /// extraction (nibbles, bits) via `transform_memref_value`.
         fn peek_fn(&mut self) -> impl FnMut(u32, MemSize) -> u32 + '_ {
             move |addr, size| {
                 let a = addr as usize;
                 if a >= self.0.len() {
                     return 0;
                 }
-                match size {
-                    MemSize::Byte => self.0[a] as u32,
-                    MemSize::Word => {
-                        let lo = self.0.get(a).copied().unwrap_or(0) as u32;
-                        let hi = self.0.get(a + 1).copied().unwrap_or(0) as u32;
-                        lo | (hi << 8)
-                    }
-                    MemSize::ThreeBytes => {
-                        let b0 = self.0.get(a).copied().unwrap_or(0) as u32;
-                        let b1 = self.0.get(a + 1).copied().unwrap_or(0) as u32;
-                        let b2 = self.0.get(a + 2).copied().unwrap_or(0) as u32;
-                        b0 | (b1 << 8) | (b2 << 16)
-                    }
-                    MemSize::DWord => {
-                        let b0 = self.0.get(a).copied().unwrap_or(0) as u32;
-                        let b1 = self.0.get(a + 1).copied().unwrap_or(0) as u32;
-                        let b2 = self.0.get(a + 2).copied().unwrap_or(0) as u32;
-                        let b3 = self.0.get(a + 3).copied().unwrap_or(0) as u32;
-                        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-                    }
-                    MemSize::LowNibble => (self.0[a] & 0x0F) as u32,
-                    MemSize::HighNibble => ((self.0[a] >> 4) & 0x0F) as u32,
-                    MemSize::Bit0 => ((self.0[a] >> 0) & 1) as u32,
-                    MemSize::Bit1 => ((self.0[a] >> 1) & 1) as u32,
-                    MemSize::Bit2 => ((self.0[a] >> 2) & 1) as u32,
-                    MemSize::Bit3 => ((self.0[a] >> 3) & 1) as u32,
-                    MemSize::Bit4 => ((self.0[a] >> 4) & 1) as u32,
-                    MemSize::Bit5 => ((self.0[a] >> 5) & 1) as u32,
-                    MemSize::Bit6 => ((self.0[a] >> 6) & 1) as u32,
-                    MemSize::Bit7 => ((self.0[a] >> 7) & 1) as u32,
-                    MemSize::BitCount => self.0[a].count_ones(),
-                    _ => 0,
+                let n: usize = match size {
+                    MemSize::Byte => 1,
+                    MemSize::Word => 2,
+                    MemSize::ThreeBytes => 3,
+                    MemSize::DWord => 4,
+                    _ => 1,
+                };
+                let mut val: u32 = 0;
+                for i in 0..n {
+                    val |= (self.0.get(a + i).copied().unwrap_or(0) as u32) << (8 * i);
                 }
+                val
             }
         }
     }
@@ -1252,19 +1719,38 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 11: MeasuredIf gates display (basic: condset still triggers)
+    // Test 11: MeasuredIf gates satisfaction (matches rcheevos: is_true &= cond_valid)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn measured_if_does_not_block_trigger() {
-        // Q:0xH0001=0_0xH0000=1 — MeasuredIf false but standard still triggers.
+    fn measured_if_blocks_trigger_when_false() {
+        // Q:0xH0001=0_0xH0000=1 — MeasuredIf false blocks trigger.
+        // Frame 1: mem[0]=0, mem[1]=0. MeasuredIf: 0=0 true. Standard: 0≠1 false.
+        //          Not satisfied → exits WAITING.
+        // Frame 2: mem[0]=1, mem[1]=1. MeasuredIf: 1≠0 false → blocks. No trigger.
+        // Frame 3: mem[0]=1, mem[1]=0. MeasuredIf: 0=0 true. Standard: 1=1 true → triggers!
         let trigger = run_frames("Q:0xH0001=0_0xH0000=1", 5, |frame, mem| {
-            if frame == 2 {
+            if frame >= 2 {
                 mem.write(0x0000, 1);
-                mem.write(0x0001, 1); // MeasuredIf false (!=0)
+            }
+            if frame == 2 {
+                mem.write(0x0001, 1); // MeasuredIf false → blocks
+            } else {
+                mem.write(0x0001, 0); // MeasuredIf true
             }
         });
-        // Standard condition at idx 1 passes; MeasuredIf does not block it.
+        assert_eq!(trigger, Some(3));
+    }
+
+    #[test]
+    fn measured_if_allows_trigger_when_true() {
+        // Q:0xH0001=1_0xH0000=1 — MeasuredIf true allows trigger.
+        let trigger = run_frames("Q:0xH0001=1_0xH0000=1", 5, |frame, mem| {
+            if frame >= 2 {
+                mem.write(0x0000, 1);
+                mem.write(0x0001, 1); // MeasuredIf true
+            }
+        });
         assert_eq!(trigger, Some(2));
     }
 
@@ -1325,19 +1811,18 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn prior_value_tracks_before_change() {
-        // `0xH0000=p0xH0000` triggers when current == prior
-        // (i.e., value hasn't changed since its *last* change — true after
-        // a stable frame following a change)
+    fn waiting_blocks_always_true_condition() {
+        // `0xH0000=p0xH0000` — current == prior. True from frame 1 (both 0).
+        // rcheevos WAITING state prevents triggering when the condition is
+        // never false. This is the anti-auto-trigger behaviour.
         let ach = Achievement::parse("0xH0000=p0xH0000").unwrap();
         let mut state = AchievementState::for_achievement(&ach);
         let mut mem = Mem::new(0x10000);
 
-        // Frame 1: value=0, prior=0, last=0. 0==0 → triggers? Yes.
-        mem.write(0x0000, 0);
-        let t1 = eval_achievement(&ach, &mut state, mem.peek_fn());
-        // First frame: had_sample was false so prior=0, current=0 → equal, trigger.
-        assert!(t1);
+        for _ in 0..20 {
+            assert!(!eval_achievement(&ach, &mut state, mem.peek_fn()));
+        }
+        assert!(state.waiting, "should stay in WAITING when condition is always true");
     }
 
     #[test]
@@ -1475,9 +1960,9 @@ mod tests {
             }
         }
         // Frame 1: hit=1, frame 2: hit=2
-        // Frame 3: Z fires → hit_count reset to 0 then condition eval → hit=1
-        // Frame 4: hit=2, frame 5: hit=3 → triggers.
-        assert_eq!(triggered_frame, Some(5));
+        // Frame 3: Z fires → hit_count reset to 0, forced false → hit stays 0
+        // Frame 4: hit=1, frame 5: hit=2, frame 6: hit=3 → triggers.
+        assert_eq!(triggered_frame, Some(6));
     }
 
     // -----------------------------------------------------------------------
@@ -1496,10 +1981,14 @@ mod tests {
 
     #[test]
     fn operator_less_than() {
-        let trigger = run_frames("0xH0000<10", 5, |_frame, mem| {
-            mem.write(0x0000, 5);
+        let trigger = run_frames("0xH0000<10", 5, |frame, mem| {
+            if frame >= 2 {
+                mem.write(0x0000, 5); // 5 < 10 → true from frame 2
+            } else {
+                mem.write(0x0000, 20); // 20 < 10 → false → exits WAITING
+            }
         });
-        assert_eq!(trigger, Some(1));
+        assert_eq!(trigger, Some(2));
     }
 
     #[test]
@@ -1521,8 +2010,12 @@ mod tests {
         let ach = Achievement::parse("0xH0000=1").unwrap();
         let mut state = AchievementState::for_achievement(&ach);
         let mut mem = Mem::new(0x10000);
-        mem.write(0x0000, 1);
 
+        // Frame 1: condition false → exits WAITING.
+        assert!(!eval_achievement(&ach, &mut state, mem.peek_fn()));
+
+        // Frame 2+: condition true — should fire exactly once.
+        mem.write(0x0000, 1);
         let mut trigger_count = 0u32;
         for _ in 0..5 {
             if eval_achievement(&ach, &mut state, mem.peek_fn()) {
@@ -1617,10 +2110,14 @@ mod tests {
 
     #[test]
     fn op_less_or_equal() {
-        let trigger = run_frames("0xH0000<=10", 5, |_frame, mem| {
-            mem.write(0x0000, 10);
+        let trigger = run_frames("0xH0000<=10", 5, |frame, mem| {
+            if frame >= 2 {
+                mem.write(0x0000, 10); // 10 <= 10 → true from frame 2
+            } else {
+                mem.write(0x0000, 20); // 20 <= 10 → false → exits WAITING
+            }
         });
-        assert_eq!(trigger, Some(1));
+        assert_eq!(trigger, Some(2));
     }
 
     // -----------------------------------------------------------------------
@@ -1647,5 +2144,57 @@ mod tests {
             }
         });
         assert_eq!(trigger, Some(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 26: Remember/Recall
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn remember_recall_basic() {
+        // K:0xH0000_{recall}=5
+        // Remember stores mem[0] (no operator/RHS — modifier row).
+        // Then {recall}=5 checks if stored value == 5.
+        // Frame 1: mem[0]=0 → remember 0, 0!=5 → false → exits WAITING
+        // Frame 2: mem[0]=5 → remember 5, 5==5 → triggers
+        let trigger = run_frames("K:0xH0000_{recall}=5", 5, |frame, mem| {
+            if frame >= 2 {
+                mem.write(0x0000, 5);
+            }
+        });
+        assert_eq!(trigger, Some(2));
+    }
+
+    #[test]
+    fn remember_recall_with_add_source() {
+        // A:0xH0000_K:0xH0001_{recall}=10
+        // AddSource mem[0] + Remember mem[1] → recall = mem[0]+mem[1]
+        // Check {recall}=10
+        let trigger = run_frames("A:0xH0000_K:0xH0001_{recall}=10", 5, |frame, mem| {
+            if frame >= 2 {
+                mem.write(0x0000, 3);
+                mem.write(0x0001, 7); // 3+7=10
+            }
+        });
+        assert_eq!(trigger, Some(2));
+    }
+
+    #[test]
+    fn remember_recall_rhs() {
+        // K:0xH0000_0xH0001={recall}
+        // Remember stores mem[0], then check mem[1]=={recall} (stored value)
+        // Frame 1: mem[0]=0, mem[1]=0 → remember 0, 0==0 → would trigger but WAITING
+        //          Actually: 0==0 is true → stays WAITING
+        // Frame 2: mem[0]=5, mem[1]=0 → remember 5, 0!=5 → exits WAITING
+        // Frame 3: mem[0]=5, mem[1]=5 → remember 5, 5==5 → triggers
+        let trigger = run_frames("K:0xH0000_0xH0001={recall}", 5, |frame, mem| {
+            if frame >= 2 {
+                mem.write(0x0000, 5);
+            }
+            if frame >= 3 {
+                mem.write(0x0001, 5);
+            }
+        });
+        assert_eq!(trigger, Some(3));
     }
 }

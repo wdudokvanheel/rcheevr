@@ -108,19 +108,34 @@ impl LoadedGame {
     /// `from_patch_json` handles it by also accepting a bare `PatchData` without
     /// an outer game-id field.
     pub fn from_patch(data: &PatchData) -> Result<Self, LoadError> {
-        // Parse achievements (preserve order, keep all flags).
-        let achievements = data
-            .achievements
-            .iter()
-            .map(convert_achievement)
-            .collect::<Result<Vec<_>, _>>()?;
+        // Parse achievements. Skip any that fail to parse (e.g. demoted
+        // achievements with unsupported flags) rather than failing the load.
+        let mut achievements = Vec::with_capacity(data.achievements.len());
+        for def in &data.achievements {
+            match convert_achievement(def) {
+                Ok(a) => achievements.push(a),
+                Err(e) => {
+                    eprintln!(
+                        "[rveevr] skipping achievement {} ({:?}): {:?}",
+                        def.id, def.title, e
+                    );
+                }
+            }
+        }
 
-        // Parse leaderboards.
-        let leaderboards = data
-            .leaderboards
-            .iter()
-            .map(convert_leaderboard)
-            .collect::<Result<Vec<_>, _>>()?;
+        // Parse leaderboards. Skip unparseable ones.
+        let mut leaderboards = Vec::with_capacity(data.leaderboards.len());
+        for def in &data.leaderboards {
+            match convert_leaderboard(def) {
+                Ok(lb) => leaderboards.push(lb),
+                Err(e) => {
+                    eprintln!(
+                        "[rveevr] skipping leaderboard {} ({:?}): {:?}",
+                        def.id, def.title, e
+                    );
+                }
+            }
+        }
 
         // Parse rich presence script.
         let rich_presence = RichPresence::parse(&data.rich_presence_patch)
@@ -141,22 +156,32 @@ impl LoadedGame {
 
     /// Parse a raw RA `patch` endpoint JSON response into a `LoadedGame`.
     ///
-    /// Tries two shapes:
-    /// 1. `RaResponse<PatchData>` envelope (`{ "Success": true, "Title": ..., ... }`)
-    /// 2. Bare `PatchData` object (no outer envelope)
+    /// Tries three shapes:
+    /// 1. Nested `PatchData` wrapper (`{ "Success": true, "PatchData": { ... } }`)
+    ///    — this is the actual RA production format.
+    /// 2. `RaResponse<PatchData>` with flattened fields.
+    /// 3. Bare `PatchData` object (no outer envelope).
     ///
-    /// Returns `LoadError::Json` when both parses fail.
+    /// Returns `LoadError::Json` when all parses fail.
     pub fn from_patch_json(json: &str) -> Result<Self, LoadError> {
-        // Attempt 1: unwrap from the RaResponse envelope.
+        // Attempt 1: { "Success": true, "PatchData": { ... } } — production format.
+        #[derive(serde::Deserialize)]
+        struct PatchWrapper {
+            #[serde(rename = "PatchData")]
+            patch_data: PatchData,
+        }
+        if let Ok(wrapper) = serde_json::from_str::<PatchWrapper>(json) {
+            return Self::from_patch(&wrapper.patch_data);
+        }
+
+        // Attempt 2: RaResponse<PatchData> with flattened fields.
         if let Ok(resp) = serde_json::from_str::<RaResponse<PatchData>>(json) {
             if let Some(data) = resp.data {
                 return Self::from_patch(&data);
             }
-            // Response parsed but data was None (unlikely for a valid patch response).
-            return Err(LoadError::Json("missing data".into()));
         }
 
-        // Attempt 2: bare PatchData without wrapper.
+        // Attempt 3: bare PatchData without wrapper.
         match serde_json::from_str::<PatchData>(json) {
             Ok(data) => Self::from_patch(&data),
             Err(e) => Err(LoadError::Json(e.to_string())),
@@ -313,12 +338,9 @@ mod tests {
     }"#;
 
     #[test]
-    fn achievement_bad_mem_returns_error() {
-        let err = LoadedGame::from_patch_json(BAD_ACH_MEM).unwrap_err();
-        match err {
-            LoadError::Achievement { id, .. } => assert_eq!(id, 99),
-            other => panic!("expected LoadError::Achievement, got {:?}", other),
-        }
+    fn achievement_bad_mem_is_skipped() {
+        let game = LoadedGame::from_patch_json(BAD_ACH_MEM).unwrap();
+        assert!(game.achievements.is_empty(), "bad achievement should be skipped");
     }
 
     // -----------------------------------------------------------------------
@@ -344,12 +366,9 @@ mod tests {
     }"#;
 
     #[test]
-    fn leaderboard_bad_mem_returns_error() {
-        let err = LoadedGame::from_patch_json(BAD_LB_MEM).unwrap_err();
-        match err {
-            LoadError::Leaderboard { id, .. } => assert_eq!(id, 42),
-            other => panic!("expected LoadError::Leaderboard, got {:?}", other),
-        }
+    fn leaderboard_bad_mem_is_skipped() {
+        let game = LoadedGame::from_patch_json(BAD_LB_MEM).unwrap();
+        assert!(game.leaderboards.is_empty(), "bad leaderboard should be skipped");
     }
 
     // -----------------------------------------------------------------------

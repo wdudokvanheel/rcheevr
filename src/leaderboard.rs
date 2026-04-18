@@ -4,7 +4,11 @@
 //! evaluator and emits state-transition events.
 
 use crate::condition::{Achievement, CompareOp, ConditionFlag, ConditionParseError, Condset};
-use crate::evaluator::{AchievementState, ConditionState, CondsetState, eval_achievement};
+use crate::evaluator::{
+    AchievementState, ConditionState, CondsetState, TypedValue, eval_achievement,
+    base_read_size, transform_memref_value, bcd_decode, size_mask,
+    is_float_size, wrap_value,
+};
 use crate::memaddr::{MemSize, Operand, OperandKind};
 
 // ---------------------------------------------------------------------------
@@ -268,6 +272,7 @@ pub fn eval_leaderboard<F: FnMut(u32, MemSize) -> u32>(
             alts: vec![],
             triggered: false,
             waiting_for_trigger_flag: false,
+            waiting: false, // leaderboard sub-triggers skip WAITING
         };
         let fired = eval_achievement(&ach, &mut ast, peek);
         *cs = ast.core;
@@ -336,38 +341,186 @@ pub fn eval_leaderboard<F: FnMut(u32, MemSize) -> u32>(
 ///
 /// Delta/Prior state is tracked per-row via `ConditionState` so subsequent
 /// frames see correct delta values.
-fn eval_value<F: FnMut(u32, MemSize) -> u32>(
+pub fn eval_value<F: FnMut(u32, MemSize) -> u32>(
     value: &Condset,
     state: &mut CondsetState,
     peek: &mut F,
 ) -> i64 {
-    let mut accum: i64 = 0;
+    // ---------------------------------------------------------------
+    // Phase 1: Advance delta/prior tracking for ALL conditions and
+    //          evaluate PauseIf. rcheevos processes pause first.
+    // ---------------------------------------------------------------
+    let mut is_paused = false;
+    let mut deltas: Vec<u32> = Vec::with_capacity(value.conditions.len());
 
     for (i, cond) in value.conditions.iter().enumerate() {
         let cs = &mut state.cond_states[i];
-
-        // Read current memory to advance delta/prior tracking.
-        let current = read_current_value(&cond.lhs, peek);
+        let current = read_current_value(&cond.lhs, 0, peek);
         let prev = update_delta_val(cs, current);
+        deltas.push(prev);
 
-        let lhs_val = resolve_val_lhs(&cond.lhs, cs, prev, peek);
-        let rhs_val = read_val_rhs(&cond.rhs, peek);
-
-        match cond.flag {
-            ConditionFlag::AddSource => {
-                accum += apply_val_modifier(lhs_val, cond.op, rhs_val) as i64;
-            }
-            ConditionFlag::SubSource => {
-                accum -= apply_val_modifier(lhs_val, cond.op, rhs_val) as i64;
-            }
-            _ => {
-                // Standard / Measured / anything else: terminal row, add lhs.
-                accum += lhs_val as i64;
+        if cond.flag == ConditionFlag::PauseIf {
+            let lhs = resolve_val_lhs(&cond.lhs, cs, prev, TypedValue::Unsigned(0), 0, peek);
+            let rhs = read_val_rhs(&cond.rhs, 0, peek);
+            if compare_typed(lhs, cond.op, rhs) {
+                is_paused = true;
             }
         }
     }
 
-    accum
+    if is_paused {
+        // When paused, freeze hit counts and return the last computed value.
+        state.is_paused = true;
+        return state.last_val_result;
+    }
+    state.is_paused = false;
+
+    // ---------------------------------------------------------------
+    // Phase 2: Evaluate ResetIf conditions. If any fires, zero all
+    //          hit counts in this condset.
+    // ---------------------------------------------------------------
+    let mut was_reset = false;
+    for (i, cond) in value.conditions.iter().enumerate() {
+        if cond.flag == ConditionFlag::ResetIf {
+            let cs = &state.cond_states[i];
+            let lhs = resolve_val_lhs(&cond.lhs, cs, deltas[i], TypedValue::Unsigned(0), 0, peek);
+            let rhs = read_val_rhs(&cond.rhs, 0, peek);
+            if compare_typed(lhs, cond.op, rhs) {
+                was_reset = true;
+            }
+        }
+    }
+    if was_reset {
+        for cs in state.cond_states.iter_mut() {
+            cs.hit_count = 0;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 3: Main value evaluation — accumulator chain, tally, etc.
+    // ---------------------------------------------------------------
+    let mut accum = ValAccum::Int(0);
+    let mut remember_val = TypedValue::Unsigned(0);
+    let mut indirect_offset: u32 = 0;
+    let mut and_next: bool = true;
+    let mut or_next: bool = false;
+    let mut add_hits: i32 = 0;
+    let mut can_measure: bool = true;
+    let mut measured_from_hits = false;
+
+    for (i, cond) in value.conditions.iter().enumerate() {
+        let cs = &mut state.cond_states[i];
+        let prev = deltas[i];
+
+        // For the main pass, re-read with indirect_offset for AddAddress chains.
+        // Delta/prior already advanced in phase 1, so just resolve values.
+        let lhs_val = resolve_val_lhs(&cond.lhs, cs, prev, remember_val, indirect_offset, peek);
+        let rhs_val = read_val_rhs(&cond.rhs, indirect_offset, peek);
+
+        match cond.flag {
+            ConditionFlag::AddSource => {
+                let val = apply_val_modifier_typed(lhs_val, cond.op, rhs_val);
+                accum = accum.add(val);
+                indirect_offset = 0;
+            }
+            ConditionFlag::SubSource => {
+                let val = apply_val_modifier_typed(lhs_val, cond.op, rhs_val);
+                accum = accum.sub(val);
+                indirect_offset = 0;
+            }
+            ConditionFlag::AddAddress => {
+                indirect_offset = indirect_offset.wrapping_add(lhs_val.to_u32());
+            }
+            ConditionFlag::Remember => {
+                remember_val = accum.apply_to(lhs_val);
+                accum = ValAccum::Int(0);
+                indirect_offset = 0;
+            }
+            ConditionFlag::AddHits => {
+                // Evaluate condition, increment hit count if true, add to add_hits.
+                let cond_true = compare_typed(lhs_val, cond.op, rhs_val);
+                let chain_ok = if or_next { or_next || cond_true }
+                               else { and_next && cond_true };
+                if chain_ok {
+                    cs.hit_count += 1;
+                }
+                add_hits += cs.hit_count as i32;
+                and_next = true;
+                or_next = false;
+            }
+            ConditionFlag::SubHits => {
+                let cond_true = compare_typed(lhs_val, cond.op, rhs_val);
+                let chain_ok = if or_next { or_next || cond_true }
+                               else { and_next && cond_true };
+                if chain_ok {
+                    cs.hit_count += 1;
+                }
+                add_hits -= cs.hit_count as i32;
+                and_next = true;
+                or_next = false;
+            }
+            ConditionFlag::Measured if is_comparison(cond.op) => {
+                // Tally mode: count hits of this comparison.
+                let cond_true = compare_typed(lhs_val, cond.op, rhs_val);
+                let chain_ok = if or_next { or_next || cond_true }
+                               else { and_next && cond_true };
+                if chain_ok {
+                    cs.hit_count += 1;
+                }
+                // Total hits = own hits + add_hits (from AddHits/SubHits), clamped >= 0.
+                let signed_hits = cs.hit_count as i32 + add_hits;
+                let total_hits = if signed_hits >= 0 { signed_hits as u32 } else { 0 };
+                add_hits = 0;
+                and_next = true;
+                or_next = false;
+                measured_from_hits = true;
+                accum = ValAccum::Int(total_hits as i64);
+                indirect_offset = 0;
+            }
+            ConditionFlag::Standard | ConditionFlag::Measured => {
+                // Value mode: contribute lhs (with modifier applied) to the
+                // accumulated result. For comparison operators (=, !=, <, etc.)
+                // apply_val_modifier_typed returns lhs unchanged.  For modifying
+                // operators (*, /, &, etc.) it applies the operation — this is
+                // essential for legacy value format (`0xhAddr*60`) where the
+                // multiplier is encoded as the condition operator + RHS.
+                let val = apply_val_modifier_typed(lhs_val, cond.op, rhs_val);
+                accum = accum.add(val);
+                indirect_offset = 0;
+                and_next = true;
+                or_next = false;
+            }
+            ConditionFlag::MeasuredIf => {
+                // MeasuredIf gates whether the measured value is reported.
+                let cond_true = compare_typed(lhs_val, cond.op, rhs_val);
+                let chain_ok = if or_next { or_next || cond_true }
+                               else { and_next && cond_true };
+                can_measure = can_measure && chain_ok;
+                and_next = true;
+                or_next = false;
+            }
+            ConditionFlag::AndNext => {
+                let cond_true = compare_typed(lhs_val, cond.op, rhs_val);
+                and_next = and_next && cond_true;
+            }
+            ConditionFlag::OrNext => {
+                let cond_true = compare_typed(lhs_val, cond.op, rhs_val);
+                or_next = or_next || cond_true;
+            }
+            // PauseIf and ResetIf already handled in phases 1-2.
+            _ => {}
+        }
+    }
+
+    // Phase 4: Apply MeasuredIf gate and reset-on-tally.
+    // If MeasuredIf was false, or tally was reset this frame, zero the result.
+    let mut result = accum.to_i64();
+    if !can_measure || (measured_from_hits && was_reset) {
+        result = 0;
+    }
+
+    state.last_val_result = result;
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -375,11 +528,20 @@ fn eval_value<F: FnMut(u32, MemSize) -> u32>(
 // ---------------------------------------------------------------------------
 
 /// Read the raw current memory value (for delta tracking).
-fn read_current_value<F: FnMut(u32, MemSize) -> u32>(op: &Operand, peek: &mut F) -> u32 {
+/// Uses base_read_size + transform_memref_value to handle sub-byte types.
+fn read_current_value<F: FnMut(u32, MemSize) -> u32>(
+    op: &Operand,
+    indirect_offset: u32,
+    peek: &mut F,
+) -> u32 {
     match op {
-        Operand::Memory { size, address, .. } => peek(*address, *size),
+        Operand::Memory { size, address, .. } => {
+            let addr = address.wrapping_add(indirect_offset);
+            let raw = peek(addr, base_read_size(*size));
+            transform_memref_value(raw, *size)
+        }
         Operand::ConstInt(v) => *v,
-        Operand::ConstFloat(f) => *f as u32,
+        Operand::ConstFloat(f) => f.to_bits(),
     }
 }
 
@@ -406,84 +568,162 @@ fn resolve_val_lhs<F: FnMut(u32, MemSize) -> u32>(
     op: &Operand,
     cs: &ConditionState,
     prev: u32,
+    remember_val: TypedValue,
+    indirect_offset: u32,
     peek: &mut F,
-) -> u32 {
+) -> TypedValue {
     match op {
-        Operand::Memory { kind, size, address } => match kind {
-            OperandKind::Address => peek(*address, *size),
-            OperandKind::Delta => prev,
-            OperandKind::Prior => cs.prior_value,
-            OperandKind::Bcd => bcd_decode(peek(*address, *size)),
-            OperandKind::Inverted => !peek(*address, *size) & size_mask(*size),
-            OperandKind::Recall => 0,
-        },
-        Operand::ConstInt(v) => *v,
-        Operand::ConstFloat(f) => *f as u32,
+        Operand::Memory { kind, size, address } => {
+            let addr = address.wrapping_add(indirect_offset);
+            let is_float = is_float_size(*size);
+            match kind {
+                OperandKind::Address => {
+                    let raw = peek(addr, base_read_size(*size));
+                    wrap_value(transform_memref_value(raw, *size), *size)
+                }
+                OperandKind::Delta => {
+                    if is_float { TypedValue::Float(f32::from_bits(prev)) } else { TypedValue::Unsigned(prev) }
+                }
+                OperandKind::Prior => {
+                    if is_float { TypedValue::Float(f32::from_bits(cs.prior_value)) } else { TypedValue::Unsigned(cs.prior_value) }
+                }
+                OperandKind::Bcd => {
+                    let raw = peek(addr, base_read_size(*size));
+                    let val = transform_memref_value(raw, *size);
+                    if is_float { TypedValue::Float(f32::from_bits(val)) } else { TypedValue::Unsigned(bcd_decode(val)) }
+                }
+                OperandKind::Inverted => {
+                    let raw = peek(addr, base_read_size(*size));
+                    let val = transform_memref_value(raw, *size);
+                    if is_float { TypedValue::Float(f32::from_bits(val)) } else { TypedValue::Unsigned(!val & size_mask(*size)) }
+                }
+                OperandKind::Recall => remember_val,
+            }
+        }
+        Operand::ConstInt(v) => TypedValue::Unsigned(*v),
+        Operand::ConstFloat(f) => TypedValue::Float(*f),
     }
 }
 
 /// Read the RHS operand (static, no delta state needed for VAL chains).
-fn read_val_rhs<F: FnMut(u32, MemSize) -> u32>(op: &Operand, peek: &mut F) -> u32 {
+fn read_val_rhs<F: FnMut(u32, MemSize) -> u32>(
+    op: &Operand,
+    indirect_offset: u32,
+    peek: &mut F,
+) -> TypedValue {
     match op {
-        Operand::Memory { size, address, .. } => peek(*address, *size),
-        Operand::ConstInt(v) => *v,
-        Operand::ConstFloat(f) => *f as u32,
+        Operand::Memory { size, address, .. } => {
+            let addr = address.wrapping_add(indirect_offset);
+            let raw = peek(addr, base_read_size(*size));
+            wrap_value(transform_memref_value(raw, *size), *size)
+        }
+        Operand::ConstInt(v) => TypedValue::Unsigned(*v),
+        Operand::ConstFloat(f) => TypedValue::Float(*f),
     }
 }
 
-/// Apply a modifier operator for AddSource/SubSource rows in a VAL chain.
-fn apply_val_modifier(value: u32, op: CompareOp, rhs: u32) -> u32 {
+/// Is the operator a comparison (not a modifying/arithmetic operator)?
+/// Comparison ops in VALUE context cause Measured to act as a tally counter.
+fn is_comparison(op: CompareOp) -> bool {
+    matches!(
+        op,
+        CompareOp::Equal
+            | CompareOp::NotEqual
+            | CompareOp::Less
+            | CompareOp::LessOrEqual
+            | CompareOp::Greater
+            | CompareOp::GreaterOrEqual
+    )
+}
+
+/// Compare two typed values using a comparison operator.
+fn compare_typed(lhs: TypedValue, op: CompareOp, rhs: TypedValue) -> bool {
+    lhs.typed_compare(op, rhs)
+}
+
+/// Typed accumulator for leaderboard value chains.
+#[derive(Clone, Copy)]
+enum ValAccum {
+    Int(i64),
+    Float(f64),
+}
+
+impl ValAccum {
+    fn add(self, val: TypedValue) -> Self {
+        match (self, val) {
+            (ValAccum::Int(acc), TypedValue::Unsigned(v)) => ValAccum::Int(acc + v as i64),
+            (ValAccum::Int(acc), TypedValue::Float(f)) => ValAccum::Float(acc as f64 + f as f64),
+            (ValAccum::Float(acc), TypedValue::Unsigned(v)) => ValAccum::Float(acc + v as f64),
+            (ValAccum::Float(acc), TypedValue::Float(f)) => ValAccum::Float(acc + f as f64),
+        }
+    }
+
+    fn sub(self, val: TypedValue) -> Self {
+        match (self, val) {
+            (ValAccum::Int(acc), TypedValue::Unsigned(v)) => ValAccum::Int(acc - v as i64),
+            (ValAccum::Int(acc), TypedValue::Float(f)) => ValAccum::Float(acc as f64 - f as f64),
+            (ValAccum::Float(acc), TypedValue::Unsigned(v)) => ValAccum::Float(acc - v as f64),
+            (ValAccum::Float(acc), TypedValue::Float(f)) => ValAccum::Float(acc - f as f64),
+        }
+    }
+
+    fn apply_to(self, raw_lhs: TypedValue) -> TypedValue {
+        match self {
+            ValAccum::Int(0) => raw_lhs,
+            ValAccum::Int(acc) => match raw_lhs {
+                TypedValue::Unsigned(v) => TypedValue::Unsigned((v as i64 + acc) as u32),
+                TypedValue::Float(f) => TypedValue::Float((f as f64 + acc as f64) as f32),
+            },
+            ValAccum::Float(acc) => match raw_lhs {
+                TypedValue::Unsigned(v) => TypedValue::Float((v as f64 + acc) as f32),
+                TypedValue::Float(f) => TypedValue::Float((f as f64 + acc) as f32),
+            },
+        }
+    }
+
+    fn to_i64(self) -> i64 {
+        match self {
+            ValAccum::Int(v) => v,
+            ValAccum::Float(f) => f as i64,
+        }
+    }
+}
+
+/// Apply a modifier operation with typed values for VAL chains.
+fn apply_val_modifier_typed(lhs: TypedValue, op: CompareOp, rhs: TypedValue) -> TypedValue {
     match op {
-        CompareOp::Multiply => value.wrapping_mul(rhs),
-        CompareOp::Divide => {
-            if rhs == 0 { 0 } else { value / rhs }
+        CompareOp::BitwiseAnd | CompareOp::BitwiseXor => {
+            let a = lhs.to_u32();
+            let b = rhs.to_u32();
+            TypedValue::Unsigned(match op {
+                CompareOp::BitwiseAnd => a & b,
+                _ => a ^ b,
+            })
         }
-        CompareOp::BitwiseAnd => value & rhs,
-        CompareOp::BitwiseXor => value ^ rhs,
-        CompareOp::Modulo => {
-            if rhs == 0 { 0 } else { value % rhs }
+        _ => {
+            if lhs.is_float() || rhs.is_float() {
+                let a = lhs.to_f32();
+                let b = rhs.to_f32();
+                TypedValue::Float(match op {
+                    CompareOp::Multiply => a * b,
+                    CompareOp::Divide => if b == 0.0 { 0.0 } else { a / b },
+                    CompareOp::Modulo => if b == 0.0 { 0.0 } else { a % b },
+                    _ => a,
+                })
+            } else {
+                let a = lhs.to_u32();
+                let b = rhs.to_u32();
+                TypedValue::Unsigned(match op {
+                    CompareOp::Multiply => a.wrapping_mul(b),
+                    CompareOp::Divide => if b == 0 { 0 } else { a / b },
+                    CompareOp::Modulo => if b == 0 { 0 } else { a % b },
+                    _ => a,
+                })
+            }
         }
-        _ => value, // None / comparison ops: pass raw value through
     }
 }
 
-/// Size mask for Inverted operands.
-fn size_mask(size: MemSize) -> u32 {
-    match size {
-        MemSize::Bit0
-        | MemSize::Bit1
-        | MemSize::Bit2
-        | MemSize::Bit3
-        | MemSize::Bit4
-        | MemSize::Bit5
-        | MemSize::Bit6
-        | MemSize::Bit7 => 0x1,
-        MemSize::LowNibble | MemSize::HighNibble => 0xF,
-        MemSize::Byte | MemSize::BitCount => 0xFF,
-        MemSize::Word | MemSize::BigEndianWord => 0xFFFF,
-        MemSize::ThreeBytes | MemSize::BigEndianThreeBytes => 0xFFFFFF,
-        _ => 0xFFFFFFFF,
-    }
-}
-
-/// BCD decode a packed BCD value (each nibble = one decimal digit).
-fn bcd_decode(raw: u32) -> u32 {
-    let d0 = raw & 0xF;
-    let d1 = (raw >> 4) & 0xF;
-    let d2 = (raw >> 8) & 0xF;
-    let d3 = (raw >> 12) & 0xF;
-    let d4 = (raw >> 16) & 0xF;
-    let d5 = (raw >> 20) & 0xF;
-    let d6 = (raw >> 24) & 0xF;
-    let d7 = (raw >> 28) & 0xF;
-    d0 + d1 * 10
-        + d2 * 100
-        + d3 * 1000
-        + d4 * 10000
-        + d5 * 100000
-        + d6 * 1000000
-        + d7 * 10000000
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -514,15 +754,18 @@ mod tests {
                 if a >= self.0.len() {
                     return 0;
                 }
-                match size {
-                    MemSize::Byte => self.0[a] as u32,
-                    MemSize::Word => {
-                        let lo = self.0.get(a).copied().unwrap_or(0) as u32;
-                        let hi = self.0.get(a + 1).copied().unwrap_or(0) as u32;
-                        lo | (hi << 8)
-                    }
-                    _ => 0,
+                let n: usize = match size {
+                    MemSize::Byte => 1,
+                    MemSize::Word => 2,
+                    MemSize::ThreeBytes => 3,
+                    MemSize::DWord => 4,
+                    _ => 1,
+                };
+                let mut val: u32 = 0;
+                for i in 0..n {
+                    val |= (self.0.get(a + i).copied().unwrap_or(0) as u32) << (8 * i);
                 }
+                val
             }
         }
     }

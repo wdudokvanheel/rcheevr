@@ -182,19 +182,19 @@ fn ach(id: u32, title: &str, memaddr: &str, points: u32) -> serde_json::Value {
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// 1. ROM header constant triggers immediately
+// 1. ROM header constant triggers with hit count
 //
-// Address 0x0104 is the first byte of the Nintendo logo in every valid GB
-// ROM. Its value is 0xCE (206 decimal) before the game's boot sequence runs
-// DMA. This fires on frame 1 (well before DMA kicks in).
+// Address 0x0104 is the first byte of the Nintendo logo (0xCE = 206).
+// A hit count of 5 means the achievement exits WAITING on frame 1
+// (condition true but target not reached) and fires on frame 5.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn immediate_trigger_rom_header() {
+fn rom_header_hit_count() {
     let rom = require_rom!();
 
     let mock = mock_with_achievements(json!([
-        ach(1001, "ROM Header", "0xH0104=206", 5)
+        ach(1001, "ROM Header", "0xH0104=206(5)", 5)
     ]));
 
     let mut rt = runtime_with(mock);
@@ -202,9 +202,14 @@ fn immediate_trigger_rom_header() {
     rt.load_rom(&rom).unwrap();
 
     let mut gb = boot_gb(&rom);
-    let events = run_frames(&mut gb, &mut rt, 1);
 
-    assert_eq!(unlocked_ids(&events), vec![1001]);
+    // First 4 frames — should not fire.
+    let early = run_frames(&mut gb, &mut rt, 4);
+    assert!(unlocked_ids(&early).is_empty(), "should not fire before frame 5");
+
+    // Frame 5 — fires.
+    let frame5 = run_frames(&mut gb, &mut rt, 1);
+    assert_eq!(unlocked_ids(&frame5), vec![1001]);
 }
 
 // ---------------------------------------------------------------------------
@@ -324,8 +329,9 @@ fn delta_detects_memory_change() {
 // ---------------------------------------------------------------------------
 // 6. Multiple achievements with staggered triggers
 //
-// Two achievements: one fires immediately (ROM header, no hit count), one
-// fires on frame 60 (ROM header with hit count 60).
+// Two achievements with different hit counts on the ROM header constant.
+// Hit-count achievements exit WAITING on frame 1 (condition true but
+// target not reached), then trigger when their hit count is met.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -333,7 +339,7 @@ fn multiple_achievements_staggered() {
     let rom = require_rom!();
 
     let mock = mock_with_achievements(json!([
-        ach(1006, "Instant",  "0xH0104=206",      5),
+        ach(1006, "Quick",    "0xH0104=206(10)",   5),
         ach(1007, "Delayed",  "0xH0104=206(60)",  10)
     ]));
 
@@ -343,12 +349,16 @@ fn multiple_achievements_staggered() {
 
     let mut gb = boot_gb(&rom);
 
-    // Frame 1 — only the instant achievement fires.
-    let frame1 = run_frames(&mut gb, &mut rt, 1);
-    assert_eq!(unlocked_ids(&frame1), vec![1006]);
+    // First 9 frames — neither should fire.
+    let early = run_frames(&mut gb, &mut rt, 9);
+    assert!(unlocked_ids(&early).is_empty(), "neither should fire before frame 10");
 
-    // Frames 2..59 — delayed should not fire yet.
-    let mid = run_frames(&mut gb, &mut rt, 58);
+    // Frame 10 — quick fires.
+    let frame10 = run_frames(&mut gb, &mut rt, 1);
+    assert_eq!(unlocked_ids(&frame10), vec![1006]);
+
+    // Frames 11..59 — delayed should not fire yet.
+    let mid = run_frames(&mut gb, &mut rt, 49);
     assert!(unlocked_ids(&mid).is_empty(), "delayed should not fire before frame 60");
 
     // Frame 60 — delayed fires.
@@ -360,7 +370,7 @@ fn multiple_achievements_staggered() {
 // 7. No re-award on subsequent frames
 //
 // After an achievement fires, it must not fire again even if the condition
-// remains true.
+// remains true. Uses WRAM condition that triggers once during init.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -368,7 +378,7 @@ fn no_re_award() {
     let rom = require_rom!();
 
     let mock = mock_with_achievements(json!([
-        ach(1008, "Once Only", "0xH0104=206", 5)
+        ach(1008, "Once Only", "0xHC001>0", 5)
     ]));
 
     let mut rt = runtime_with(mock);
@@ -377,7 +387,8 @@ fn no_re_award() {
 
     let mut gb = boot_gb(&rom);
 
-    let first = run_frames(&mut gb, &mut rt, 1);
+    // Run enough frames for the achievement to trigger (WRAM written by ~frame 100).
+    let first = run_frames(&mut gb, &mut rt, 600);
     assert_eq!(unlocked_ids(&first), vec![1008]);
 
     // 200 more frames — must not re-award.

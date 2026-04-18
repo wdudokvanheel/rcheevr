@@ -420,7 +420,9 @@ impl RichPresence {
                         section = Section::FormatDone;
                         continue;
                     }
-                    if let Some(ty_str) = line.strip_prefix("FormatType=") {
+                    if let Some(ty_str) = line.strip_prefix("FormatType=")
+                        .or_else(|| line.strip_prefix("FormatType:"))
+                    {
                         let ty = parse_format_type(ty_str);
                         rp.formats.push(Format { name: name.clone(), ty });
                         format_type_seen = true;

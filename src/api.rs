@@ -53,8 +53,8 @@ pub mod login2 {
     pub struct Login2Data {
         #[serde(rename = "User")]
         pub user: String,
-        #[serde(rename = "DisplayName")]
-        pub display_name: String,
+        #[serde(rename = "DisplayName", default)]
+        pub display_name: Option<String>,
         /// Reusable API token for subsequent requests (store in keyring).
         #[serde(rename = "Token")]
         pub token: String,
@@ -356,7 +356,7 @@ mod tests {
         assert!(resp.success);
         assert!(resp.error.is_none());
         let data = resp.data.unwrap();
-        assert_eq!(data.display_name, "Test User");
+        assert_eq!(data.display_name.as_deref(), Some("Test User"));
         assert_eq!(data.token, "abc123token");
         assert_eq!(data.score, 500);
         assert_eq!(data.softcore_score, 100);

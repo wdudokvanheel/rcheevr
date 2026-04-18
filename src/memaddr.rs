@@ -172,6 +172,13 @@ pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
             b'I' | b'i' => { pos += 1; MemSize::BigEndianWord }  // 16-bit BE
             b'J' | b'j' => { pos += 1; MemSize::BigEndianThreeBytes } // 24-bit BE
             b'G' | b'g' => { pos += 1; MemSize::BigEndianDWord } // 32-bit BE
+            // Legacy: hex digit after 0x with no size prefix → 16-bit Word.
+            // Don't advance pos; the digit is part of the address.
+            b'0' if b.get(pos + 1).copied() == Some(b'x') => {
+                // 0x0x... is a double-prefix typo — reject like rcheevos does.
+                return Err(ParseError { pos, msg: "double 0x prefix" });
+            }
+            b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' => { MemSize::Word }
             _ => {
                 return Err(ParseError { pos, msg: "unknown size prefix letter after 0x" });
             }
@@ -319,6 +326,19 @@ pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
             })?
         };
         return Ok((Operand::ConstInt(value), pos));
+    }
+
+    // Case E2: `{recall}` — the recall pseudo-operand reads the Remember register.
+    if b[pos..].starts_with(b"{recall}") {
+        pos += 8; // "{recall}".len()
+        return Ok((
+            Operand::Memory {
+                kind: OperandKind::Recall,
+                size: MemSize::DWord, // size is ignored for Recall
+                address: 0,           // address is ignored for Recall
+            },
+            pos,
+        ));
     }
 
     // Case E: bare decimal immediate (e.g. `1234`)
