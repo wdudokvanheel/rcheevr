@@ -337,7 +337,7 @@ fn parse_flag(c: u8, _pos: usize) -> Result<ConditionFlag, ConditionParseError> 
 /// Returns `(op, bytes_consumed)`.
 fn parse_op(s: &str) -> Result<(CompareOp, usize), ConditionParseError> {
     let b = s.as_bytes();
-    match b.get(0) {
+    match b.first() {
         Some(b'=') => Ok((CompareOp::Equal, 1)),
         Some(b'!') if b.get(1) == Some(&b'=') => Ok((CompareOp::NotEqual, 2)),
         Some(b'<') if b.get(1) == Some(&b'=') => Ok((CompareOp::LessOrEqual, 2)),
@@ -429,12 +429,11 @@ mod tests {
     // Helper: assert a condition has the expected flag
     // -----------------------------------------------------------------------
     fn cond(s: &str) -> Condition {
-        parse_condition(s, 0).unwrap_or_else(|e| panic!("parse_condition({:?}) failed: {:?}", s, e))
+        parse_condition(s, 0).unwrap_or_else(|e| panic!("parse_condition({s:?}) failed: {e:?}"))
     }
 
     fn ach(s: &str) -> Achievement {
-        Achievement::parse(s)
-            .unwrap_or_else(|e| panic!("Achievement::parse({:?}) failed: {}", s, e))
+        Achievement::parse(s).unwrap_or_else(|e| panic!("Achievement::parse({s:?}) failed: {e}"))
     }
 
     fn mem_operand(kind: OperandKind, size: MemSize, addr: u32) -> Operand {
@@ -767,7 +766,7 @@ mod tests {
                 size: crate::memaddr::MemSize::Bit6,
                 ..
             } => {}
-            other => panic!("expected Bit6 memory, got {:?}", other),
+            other => panic!("expected Bit6 memory, got {other:?}"),
         }
     }
 }

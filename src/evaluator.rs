@@ -719,10 +719,8 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
                     if !passes {
                         all_satisfied = false;
                     }
-                } else {
-                    if effective_hits < cond.required_hits {
-                        all_satisfied = false;
-                    }
+                } else if effective_hits < cond.required_hits {
+                    all_satisfied = false;
                 }
             }
         }
@@ -1179,14 +1177,14 @@ pub(crate) fn size_mask(size: MemSize) -> u32 {
 
 pub(crate) fn bcd_decode(raw: u32) -> u32 {
     // Treat the raw value as packed BCD (each nibble is one decimal digit).
-    let d0 = (raw & 0xF) as u32;
-    let d1 = ((raw >> 4) & 0xF) as u32;
-    let d2 = ((raw >> 8) & 0xF) as u32;
-    let d3 = ((raw >> 12) & 0xF) as u32;
-    let d4 = ((raw >> 16) & 0xF) as u32;
-    let d5 = ((raw >> 20) & 0xF) as u32;
-    let d6 = ((raw >> 24) & 0xF) as u32;
-    let d7 = ((raw >> 28) & 0xF) as u32;
+    let d0 = raw & 0xF;
+    let d1 = (raw >> 4) & 0xF;
+    let d2 = (raw >> 8) & 0xF;
+    let d3 = (raw >> 12) & 0xF;
+    let d4 = (raw >> 16) & 0xF;
+    let d5 = (raw >> 20) & 0xF;
+    let d6 = (raw >> 24) & 0xF;
+    let d7 = (raw >> 28) & 0xF;
     d0 + d1 * 10 + d2 * 100 + d3 * 1000 + d4 * 10000 + d5 * 100000 + d6 * 1000000 + d7 * 10000000
 }
 

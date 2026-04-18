@@ -49,16 +49,16 @@ impl ValueFormat {
     pub fn format(self, v: i64) -> String {
         match self {
             ValueFormat::Value | ValueFormat::Unsigned | ValueFormat::Other => v.to_string(),
-            ValueFormat::Score => format!("{:06}", v),
+            ValueFormat::Score => format!("{v:06}"),
             ValueFormat::TimeSecs => {
                 let total = v.unsigned_abs();
                 let h = total / 3600;
                 let m = (total / 60) % 60;
                 let s = total % 60;
                 if h > 0 {
-                    format!("{}h{:02}:{:02}", h, m, s)
+                    format!("{h}h{m:02}:{s:02}")
                 } else {
-                    format!("{}:{:02}", m, s)
+                    format!("{m}:{s:02}")
                 }
             }
             ValueFormat::Frames => {
@@ -67,22 +67,22 @@ impl ValueFormat {
                 let m = (secs / 60) % 60;
                 let s = secs % 60;
                 if h > 0 {
-                    format!("{}h{:02}:{:02}", h, m, s)
+                    format!("{h}h{m:02}:{s:02}")
                 } else {
-                    format!("{}:{:02}", m, s)
+                    format!("{m}:{s:02}")
                 }
             }
             ValueFormat::Minutes => {
                 let total = v.unsigned_abs();
                 let h = total / 60;
                 let m = total % 60;
-                format!("{}h{:02}", h, m)
+                format!("{h}h{m:02}")
             }
             ValueFormat::Millisecs => {
                 let total = v.unsigned_abs();
                 let s = total / 100;
                 let cs = total % 100;
-                format!("{}.{:02}", s, cs)
+                format!("{s}.{cs:02}")
             }
             ValueFormat::Fixed1 => {
                 let abs = v.unsigned_abs();
@@ -1175,7 +1175,7 @@ mod tests {
             let display = lb.format.format(value);
             assert_eq!(display, "1:30"); // 90 seconds = 1:30
         } else {
-            panic!("expected Submitted, got {:?}", ev);
+            panic!("expected Submitted, got {ev:?}");
         }
     }
 

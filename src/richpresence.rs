@@ -136,7 +136,7 @@ fn parse_format_type(s: &str) -> FormatType {
 /// Format a u32 according to the given FormatType.
 pub fn format_value(ty: FormatType, v: u32) -> String {
     match ty {
-        FormatType::Score => format!("{:06}", v),
+        FormatType::Score => format!("{v:06}"),
         FormatType::Value => v.to_string(),
         FormatType::Frames => {
             // Convert frames @ 60 fps to M:SS or HhMM:SS
@@ -145,9 +145,9 @@ pub fn format_value(ty: FormatType, v: u32) -> String {
             let m = (total_secs / 60) % 60;
             let s = total_secs % 60;
             if h > 0 {
-                format!("{}h{:02}:{:02}", h, m, s)
+                format!("{h}h{m:02}:{s:02}")
             } else {
-                format!("{}:{:02}", m, s)
+                format!("{m}:{s:02}")
             }
         }
         FormatType::TimeSecs => {
@@ -155,20 +155,20 @@ pub fn format_value(ty: FormatType, v: u32) -> String {
             let m = (v / 60) % 60;
             let s = v % 60;
             if h > 0 {
-                format!("{}h{:02}:{:02}", h, m, s)
+                format!("{h}h{m:02}:{s:02}")
             } else {
-                format!("{}:{:02}", m, s)
+                format!("{m}:{s:02}")
             }
         }
         FormatType::Minutes => {
             let h = v / 60;
             let m = v % 60;
-            format!("{}h{:02}", h, m)
+            format!("{h}h{m:02}")
         }
         FormatType::Millisecs => {
             let s = v / 100;
             let cs = v % 100;
-            format!("{}.{:02}", s, cs)
+            format!("{s}.{cs:02}")
         }
         FormatType::Fixed1 => format!("{}.{}", v / 10, v % 10),
         FormatType::Fixed2 => format!("{}.{:02}", v / 100, v % 100),
@@ -180,10 +180,10 @@ pub fn format_value(ty: FormatType, v: u32) -> String {
         FormatType::Float4 => format!("{:.4}", f32::from_bits(v)),
         FormatType::Float5 => format!("{:.5}", f32::from_bits(v)),
         FormatType::Float6 => format!("{:.6}", f32::from_bits(v)),
-        FormatType::Tens => format!("{}0", v),
-        FormatType::Hundreds => format!("{}00", v),
-        FormatType::Thousands => format!("{}000", v),
-        FormatType::Millions => format!("{}000000", v),
+        FormatType::Tens => format!("{v}0"),
+        FormatType::Hundreds => format!("{v}00"),
+        FormatType::Thousands => format!("{v}000"),
+        FormatType::Millions => format!("{v}000000"),
         FormatType::Unsigned => v.to_string(),
         FormatType::Unformatted | FormatType::Other => v.to_string(),
     }
@@ -486,13 +486,13 @@ impl RichPresence {
                         continue;
                     }
                     // A display line may start with `?cond?` for a conditional.
-                    let (condition, body) = if line.starts_with('?') {
+                    let (condition, body) = if let Some(stripped) = line.strip_prefix('?') {
                         // Find the closing '?'
-                        let end = line[1..].find('?').ok_or(RichPresenceParseError {
+                        let end = stripped.find('?').ok_or(RichPresenceParseError {
                             line: lineno,
                             msg: "unterminated condition in display line",
                         })?;
-                        let cond_str = &line[1..1 + end];
+                        let cond_str = &stripped[..end];
                         // The condition in RA rich presence is `operand=value`
                         // or just an operand.  For milestone 6 we parse only the
                         // left-hand operand and treat nonzero as true.
@@ -501,7 +501,7 @@ impl RichPresence {
                                 line: lineno,
                                 msg: "invalid condition operand in display line",
                             })?;
-                        let body = &line[1 + end + 1..]; // after the closing '?'
+                        let body = &stripped[end + 1..]; // after the closing '?'
                         (Some(operand), body)
                     } else {
                         (None, line)
@@ -727,7 +727,7 @@ mod tests {
                     }
                 ));
             }
-            other => panic!("expected Format segment, got {:?}", other),
+            other => panic!("expected Format segment, got {other:?}"),
         }
     }
 
@@ -752,7 +752,7 @@ mod tests {
                     }
                 ));
             }
-            other => panic!("expected Lookup segment, got {:?}", other),
+            other => panic!("expected Lookup segment, got {other:?}"),
         }
     }
 

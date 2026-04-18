@@ -570,12 +570,12 @@ impl<H: HttpTransport> AchievementRuntime<H> {
                 Ok(bytes) => {
                     if let Err(e) = Self::parse_empty_response(&bytes, "ping") {
                         self.events
-                            .push(AchievementEvent::ServerError(format!("ping: {:?}", e)));
+                            .push(AchievementEvent::ServerError(format!("ping: {e:?}")));
                     }
                 }
                 Err(e) => self
                     .events
-                    .push(AchievementEvent::ServerError(format!("ping: {:?}", e))),
+                    .push(AchievementEvent::ServerError(format!("ping: {e:?}"))),
             }
         }
     }

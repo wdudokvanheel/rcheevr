@@ -49,9 +49,7 @@ impl MockRaServer {
             .route("/dorequest.php", post(handler))
             .with_state(state_clone);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -300,8 +298,7 @@ async fn login_failure_propagates() {
 
     assert!(
         matches!(err, rveevr::client::RuntimeError::Api(_)),
-        "expected RuntimeError::Api, got {:?}",
-        err
+        "expected RuntimeError::Api, got {err:?}",
     );
 
     server.stop().await;
@@ -331,8 +328,7 @@ async fn unknown_game_returns_error() {
 
     assert!(
         matches!(err, rveevr::client::RuntimeError::Api(_)),
-        "expected RuntimeError::Api for unknown game, got {:?}",
-        err
+        "expected RuntimeError::Api for unknown game, got {err:?}",
     );
 
     server.stop().await;

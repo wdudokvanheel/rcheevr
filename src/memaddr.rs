@@ -447,8 +447,8 @@ pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
         }
         let dec_str = &s[dec_start..pos];
         // rcheevos treats the value as unsigned; a negative prefix wraps around in u32
-        let value: u32 = if dec_str.starts_with('-') {
-            let mag: u32 = dec_str[1..].parse().map_err(|_| ParseError {
+        let value: u32 = if let Some(stripped) = dec_str.strip_prefix('-') {
+            let mag: u32 = stripped.parse().map_err(|_| ParseError {
                 pos: dec_start,
                 msg: "invalid decimal immediate",
             })?;
@@ -476,7 +476,7 @@ pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
     }
 
     // Case E: bare decimal immediate (e.g. `1234`)
-    if b.get(pos).map_or(false, |c| c.is_ascii_digit()) {
+    if b.get(pos).is_some_and(|c| c.is_ascii_digit()) {
         let dec_start = pos;
         while pos < b.len() && b[pos].is_ascii_digit() {
             pos += 1;
@@ -570,7 +570,7 @@ mod tests {
 
     // Convenience: parse and assert success.
     fn ok(s: &str) -> (Operand, usize) {
-        parse_operand(s).unwrap_or_else(|e| panic!("expected Ok for {:?}, got {:?}", s, e))
+        parse_operand(s).unwrap_or_else(|e| panic!("expected Ok for {s:?}, got {e:?}"))
     }
 
     // Convenience: parse and assert error.
@@ -587,7 +587,7 @@ mod tests {
                 size,
                 address,
             } => (kind, size, address, consumed),
-            other => panic!("expected Memory for {:?}, got {:?}", s, other),
+            other => panic!("expected Memory for {s:?}, got {other:?}"),
         }
     }
 
@@ -659,7 +659,7 @@ mod tests {
         ];
         for (s, expected) in cases {
             let (_, size, _, _) = mem(s);
-            assert_eq!(size, *expected, "for input {:?}", s);
+            assert_eq!(size, *expected, "for input {s:?}");
         }
     }
 
@@ -1032,7 +1032,7 @@ mod tests {
             pos: 3,
             msg: "test error",
         };
-        let s = format!("{}", e);
+        let s = format!("{e}");
         assert!(s.contains("3"));
         assert!(s.contains("test error"));
     }

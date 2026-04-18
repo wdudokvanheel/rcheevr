@@ -343,11 +343,11 @@ When loading game data from the RA API, unparseable achievements and leaderboard
 
 ### 5. Network Retry and Rate Limiting
 
-**Risk:** The HTTP client has no retry logic or rate limiting. If the RA API returns a transient error or rate-limits the client, the request simply fails.
+**Risk:** The HTTP client has no exponential backoff or rate limiting yet. Award and leaderboard submit failures are queued and retried on later frames, but ping failures are surfaced as `ServerError`, and transient login/load failures still return errors.
 
-**Impact:** In practice, RA API calls are infrequent (login once, patch once per game, achievements on unlock, ping every ~2 minutes). But a network hiccup during `awardachievement` could cause a missed unlock report.
+**Impact:** In practice, RA API calls are infrequent (login once, patch once per game, achievements on unlock, ping every ~2 minutes). But repeated transient failures can still delay unlock reports or produce noisy runtime events.
 
-**Mitigation path:** Add retry with exponential backoff for idempotent operations (`awardachievement`, `ping`). Queue failed award calls for retry on subsequent frames.
+**Mitigation path:** Add bounded exponential backoff with jitter for retryable operations (`awardachievement`, leaderboard submit, `ping`) and cap the pending queue if network failures persist.
 
 ### 6. Memory Bus Parity
 

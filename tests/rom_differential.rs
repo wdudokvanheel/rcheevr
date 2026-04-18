@@ -127,10 +127,8 @@ fn assert_agree(tag: &str, ours: &[bool], theirs: &[bool]) {
 //
 // NOTE: rcheevos starts triggers in a WAITING state that prevents firing
 // when conditions are trivially true from frame 0 (anti-auto-trigger).
-// rveevr's low-level evaluator does not implement this state machine —
-// it fires as soon as conditions are met. All tests below therefore use
-// conditions that start FALSE and become true during gameplay, matching
-// how real achievements are authored.
+// rveevr implements the same state machine, so the cases below cover both
+// always-true and false-then-true conditions.
 // ---------------------------------------------------------------------------
 
 /// WAITING state: a condition that is always true from boot never fires.
@@ -875,7 +873,6 @@ fn diff_pokemon_red_gameplay() {
     );
 
     eprintln!(
-        "PASS: {} total evaluations ({} achievement + {} value) across {} gameplay frames, zero disagreements",
-        total, total_ach_evals, total_val_evals, eval_frames
+        "PASS: {total} total evaluations ({total_ach_evals} achievement + {total_val_evals} value) across {eval_frames} gameplay frames, zero disagreements",
     );
 }

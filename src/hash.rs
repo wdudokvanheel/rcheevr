@@ -8,7 +8,7 @@ use md5::{Digest, Md5};
 /// Compute the lowercase hex MD5 of `rom`.
 fn md5_hex(rom: &[u8]) -> String {
     let digest = Md5::digest(rom);
-    format!("{:x}", digest)
+    format!("{digest:x}")
 }
 
 /// Hash a Game Boy ROM for RetroAchievements lookup.

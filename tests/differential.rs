@@ -129,8 +129,7 @@ fn assert_logs_agree(tag: &str, ours: &[bool], theirs: &[bool]) {
     let theirs_first = theirs.iter().position(|b| *b);
     assert_eq!(
         ours_first, theirs_first,
-        "{tag}: first-trigger frame disagreement ours={:?} theirs={:?}\n  ours log:  {:?}\n  theirs:    {:?}",
-        ours_first, theirs_first, ours, theirs
+        "{tag}: first-trigger frame disagreement ours={ours_first:?} theirs={theirs_first:?}\n  ours log:  {ours:?}\n  theirs:    {theirs:?}",
     );
 }
 
@@ -1744,7 +1743,7 @@ fn trigger_with_resetif() {
             mem.write(0, 5); // trigger condition true
         }
         // Reset active frames 2-4, released from frame 5
-        mem.write(1, if frame >= 2 && frame <= 4 { 1 } else { 0 });
+        mem.write(1, if (2..=4).contains(&frame) { 1 } else { 0 });
     });
     assert_logs_agree("trigger_with_resetif", &ours, &theirs);
 }
@@ -1783,7 +1782,7 @@ fn delta_persists_through_reset() {
         // Change value on frames 3 and 7
         mem.write(
             0,
-            if frame >= 3 && frame < 5 {
+            if (3..5).contains(&frame) {
                 10
             } else if frame >= 7 {
                 20
