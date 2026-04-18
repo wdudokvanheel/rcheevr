@@ -15,7 +15,7 @@ pub enum FormatType {
     Value,
     Score,
     Frames,
-    TimeSecs,   // a.k.a. Time / Secs
+    TimeSecs, // a.k.a. Time / Secs
     Minutes,
     Millisecs,
     Fixed1,
@@ -63,9 +63,15 @@ pub struct Lookup {
 pub enum DisplaySegment {
     Literal(String),
     /// `@Name(operand)` — apply a named Format.
-    Format { name: String, operand: Operand },
+    Format {
+        name: String,
+        operand: Operand,
+    },
     /// `{Name(operand)}` — look up a value in a named Lookup.
-    Lookup { name: String, operand: Operand },
+    Lookup {
+        name: String,
+        operand: Operand,
+    },
 }
 
 /// One display line, optionally guarded by a condition.
@@ -225,7 +231,10 @@ fn parse_body(body: &str, lineno: usize) -> Result<Vec<DisplaySegment>, RichPres
             })?;
             let name = after_at[..paren].to_string();
             if name.is_empty() {
-                return Err(RichPresenceParseError { line: lineno, msg: "empty @Name" });
+                return Err(RichPresenceParseError {
+                    line: lineno,
+                    msg: "empty @Name",
+                });
             }
             let after_paren = &after_at[paren + 1..];
             // Find matching closing paren for operand.
@@ -250,7 +259,10 @@ fn parse_body(body: &str, lineno: usize) -> Result<Vec<DisplaySegment>, RichPres
             })?;
             let name = after_brace[..paren].to_string();
             if name.is_empty() {
-                return Err(RichPresenceParseError { line: lineno, msg: "empty {Name}" });
+                return Err(RichPresenceParseError {
+                    line: lineno,
+                    msg: "empty {Name}",
+                });
             }
             let after_paren = &after_brace[paren + 1..];
             // Find matching ')}'
@@ -316,9 +328,9 @@ fn parse_u32_key(s: &str) -> Option<u32> {
 /// Which section the parser is currently inside.
 enum Section {
     None,
-    Format(String),        // name; waiting for FormatType= line
-    FormatDone,            // format has been fully read
-    Lookup(String),        // name; collecting key=value lines
+    Format(String), // name; waiting for FormatType= line
+    FormatDone,     // format has been fully read
+    Lookup(String), // name; collecting key=value lines
     Display,
 }
 
@@ -420,11 +432,15 @@ impl RichPresence {
                         section = Section::FormatDone;
                         continue;
                     }
-                    if let Some(ty_str) = line.strip_prefix("FormatType=")
+                    if let Some(ty_str) = line
+                        .strip_prefix("FormatType=")
                         .or_else(|| line.strip_prefix("FormatType:"))
                     {
                         let ty = parse_format_type(ty_str);
-                        rp.formats.push(Format { name: name.clone(), ty });
+                        rp.formats.push(Format {
+                            name: name.clone(),
+                            ty,
+                        });
                         format_type_seen = true;
                     }
                     // Other lines inside a Format block are silently ignored.
@@ -492,7 +508,10 @@ impl RichPresence {
                     };
 
                     let segments = parse_body(body, lineno)?;
-                    rp.display.push(DisplayLine { condition, segments });
+                    rp.display.push(DisplayLine {
+                        condition,
+                        segments,
+                    });
                 }
             }
         }
@@ -577,9 +596,7 @@ impl RichPresence {
                         // Try Single match first, then Range.
                         let found = lk.entries.iter().find_map(|(key, val)| match key {
                             LookupKey::Single(k) if *k == v => Some(val.as_str()),
-                            LookupKey::Range(lo, hi) if v >= *lo && v <= *hi => {
-                                Some(val.as_str())
-                            }
+                            LookupKey::Range(lo, hi) if v >= *lo && v <= *hi => Some(val.as_str()),
                             _ => None,
                         });
                         if let Some(s) = found {
@@ -702,7 +719,13 @@ mod tests {
         match &dl.segments[1] {
             DisplaySegment::Format { name, operand } => {
                 assert_eq!(name, "Score");
-                assert!(matches!(operand, Operand::Memory { address: 0x5678, .. }));
+                assert!(matches!(
+                    operand,
+                    Operand::Memory {
+                        address: 0x5678,
+                        ..
+                    }
+                ));
             }
             other => panic!("expected Format segment, got {:?}", other),
         }
@@ -721,7 +744,13 @@ mod tests {
         match &dl.segments[0] {
             DisplaySegment::Lookup { name, operand } => {
                 assert_eq!(name, "Zone");
-                assert!(matches!(operand, Operand::Memory { address: 0x1234, .. }));
+                assert!(matches!(
+                    operand,
+                    Operand::Memory {
+                        address: 0x1234,
+                        ..
+                    }
+                ));
             }
             other => panic!("expected Lookup segment, got {:?}", other),
         }
@@ -741,7 +770,10 @@ mod tests {
         // The operand should be the memory ref 0x0000
         assert!(matches!(
             cond_line.condition.as_ref().unwrap(),
-            Operand::Memory { address: 0x0000, .. }
+            Operand::Memory {
+                address: 0x0000,
+                ..
+            }
         ));
         let fallback_line = &rp.display[1];
         assert!(fallback_line.condition.is_none());

@@ -15,7 +15,7 @@
 
 use gameboy_emulator::gameboy::{detect_device_model, Button, GameBoy};
 use rveevr::condition::Achievement;
-use rveevr::evaluator::{eval_achievement, AchievementState, CondsetState, ConditionState};
+use rveevr::evaluator::{eval_achievement, AchievementState, ConditionState, CondsetState};
 use rveevr::leaderboard::eval_value;
 use rveevr::memaddr::MemSize;
 use rveevr_oracle::{ffi, Trigger, Value};
@@ -87,18 +87,12 @@ fn peek_sized(gb: &GameBoy, addr: u32, size: MemSize) -> u32 {
 
 /// Run both evaluators over `frames` frames on the same ROM.
 /// Returns `(rveevr_triggered, rcheevos_triggered)` per frame.
-fn run_rom_trace(
-    gb: &mut GameBoy,
-    memaddr: &str,
-    frames: usize,
-) -> (Vec<bool>, Vec<bool>) {
-    let ach = Achievement::parse(memaddr).unwrap_or_else(|e| {
-        panic!("rveevr parse failed for {memaddr:?}: {e:?}")
-    });
+fn run_rom_trace(gb: &mut GameBoy, memaddr: &str, frames: usize) -> (Vec<bool>, Vec<bool>) {
+    let ach = Achievement::parse(memaddr)
+        .unwrap_or_else(|e| panic!("rveevr parse failed for {memaddr:?}: {e:?}"));
     let mut ours_state = AchievementState::for_achievement(&ach);
-    let mut theirs = Trigger::parse(memaddr).unwrap_or_else(|e| {
-        panic!("rcheevos parse failed for {memaddr:?}: {e:?}")
-    });
+    let mut theirs = Trigger::parse(memaddr)
+        .unwrap_or_else(|e| panic!("rcheevos parse failed for {memaddr:?}: {e:?}"));
 
     let mut ours_log = Vec::with_capacity(frames);
     let mut theirs_log = Vec::with_capacity(frames);
@@ -147,7 +141,10 @@ fn diff_waiting_blocks_always_true() {
     let mut gb = boot_gb(&rom);
     let (ours, theirs) = run_rom_trace(&mut gb, "0xH0104=206", 100);
     assert_agree("waiting_blocks_always_true", &ours, &theirs);
-    assert!(ours.iter().all(|b| !b), "should never trigger when always true from boot");
+    assert!(
+        ours.iter().all(|b| !b),
+        "should never trigger when always true from boot"
+    );
 }
 
 /// Byte not-equal comparison on WRAM.
@@ -221,11 +218,7 @@ fn diff_word_wram() {
 fn diff_multi_condset() {
     let rom = require_rom!();
     let mut gb = boot_gb(&rom);
-    let (ours, theirs) = run_rom_trace(
-        &mut gb,
-        "0xH0104=206S0xHC001>0S0xH0104=0",
-        600,
-    );
+    let (ours, theirs) = run_rom_trace(&mut gb, "0xH0104=206S0xHC001>0S0xH0104=0", 600);
     assert_agree("multi_condset", &ours, &theirs);
 }
 
@@ -236,11 +229,7 @@ fn diff_multi_condset() {
 fn diff_resetif() {
     let rom = require_rom!();
     let mut gb = boot_gb(&rom);
-    let (ours, theirs) = run_rom_trace(
-        &mut gb,
-        "0xH0104=206(10)_R:0xHC001=0",
-        600,
-    );
+    let (ours, theirs) = run_rom_trace(&mut gb, "0xH0104=206(10)_R:0xHC001=0", 600);
     assert_agree("resetif", &ours, &theirs);
 }
 
@@ -250,11 +239,7 @@ fn diff_resetif() {
 fn diff_pauseif() {
     let rom = require_rom!();
     let mut gb = boot_gb(&rom);
-    let (ours, theirs) = run_rom_trace(
-        &mut gb,
-        "0xH0104=206(10)_P:0xHC001=0",
-        600,
-    );
+    let (ours, theirs) = run_rom_trace(&mut gb, "0xH0104=206(10)_P:0xHC001=0", 600);
     assert_agree("pauseif", &ours, &theirs);
 }
 
@@ -264,11 +249,7 @@ fn diff_pauseif() {
 fn diff_andnext() {
     let rom = require_rom!();
     let mut gb = boot_gb(&rom);
-    let (ours, theirs) = run_rom_trace(
-        &mut gb,
-        "N:0xH0104=206_0xHC001>0",
-        600,
-    );
+    let (ours, theirs) = run_rom_trace(&mut gb, "N:0xH0104=206_0xHC001>0", 600);
     assert_agree("andnext", &ours, &theirs);
 }
 
@@ -279,11 +260,7 @@ fn diff_andnext() {
 fn diff_ornext() {
     let rom = require_rom!();
     let mut gb = boot_gb(&rom);
-    let (ours, theirs) = run_rom_trace(
-        &mut gb,
-        "O:0xH0104=0_0xHC001>0",
-        600,
-    );
+    let (ours, theirs) = run_rom_trace(&mut gb, "O:0xH0104=0_0xHC001>0", 600);
     assert_agree("ornext", &ours, &theirs);
     assert!(ours.iter().any(|b| *b), "OrNext should trigger");
 }
@@ -295,11 +272,7 @@ fn diff_ornext() {
 fn diff_addsource() {
     let rom = require_rom!();
     let mut gb = boot_gb(&rom);
-    let (ours, theirs) = run_rom_trace(
-        &mut gb,
-        "A:0xHC001_0xHC002>0",
-        600,
-    );
+    let (ours, theirs) = run_rom_trace(&mut gb, "A:0xHC001_0xHC002>0", 600);
     assert_agree("addsource", &ours, &theirs);
     assert!(ours.iter().any(|b| *b), "AddSource should trigger");
 }
@@ -311,11 +284,7 @@ fn diff_addsource() {
 fn diff_trigger_flag() {
     let rom = require_rom!();
     let mut gb = boot_gb(&rom);
-    let (ours, theirs) = run_rom_trace(
-        &mut gb,
-        "0xH0104=206_T:0xHC001>0",
-        600,
-    );
+    let (ours, theirs) = run_rom_trace(&mut gb, "0xH0104=206_T:0xHC001>0", 600);
     assert_agree("trigger_flag", &ours, &theirs);
 }
 
@@ -325,11 +294,7 @@ fn diff_trigger_flag() {
 fn diff_remember_recall() {
     let rom = require_rom!();
     let mut gb = boot_gb(&rom);
-    let (ours, theirs) = run_rom_trace(
-        &mut gb,
-        "K:0xHC001_{recall}>0",
-        600,
-    );
+    let (ours, theirs) = run_rom_trace(&mut gb, "K:0xHC001_{recall}>0", 600);
     assert_agree("remember_recall", &ours, &theirs);
     assert!(ours.iter().any(|b| *b), "Remember/Recall should trigger");
 }
@@ -358,7 +323,10 @@ fn press(gb: &mut GameBoy, button: Button, hold: usize, wait: usize) -> usize {
 fn skip_pokemon_red_intro(gb: &mut GameBoy) -> usize {
     let mut total = 0;
     // Boot + Nintendo logo + title screen animation
-    for _ in 0..300 { gb.run_frame(); total += 1; }
+    for _ in 0..300 {
+        gb.run_frame();
+        total += 1;
+    }
     // Press Start on title screen
     total += press(gb, Button::Start, 5, 60);
     // "NEW GAME" / "CONTINUE" menu — press A to select
@@ -378,7 +346,10 @@ fn skip_pokemon_red_intro(gb: &mut GameBoy) -> usize {
         total += press(gb, Button::A, 3, 30);
     }
     // Let the game settle into overworld
-    for _ in 0..120 { gb.run_frame(); total += 1; }
+    for _ in 0..120 {
+        gb.run_frame();
+        total += 1;
+    }
     total
 }
 
@@ -430,8 +401,8 @@ struct LeaderboardDef {
 
 fn load_fixture(name: &str) -> PatchData {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
-    let json = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+    let json =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
     let resp: PatchResponse =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
     resp.patch_data
@@ -458,12 +429,7 @@ fn diff_pokemon_red_all_achievements() {
     let mut gb = boot_gb(&rom);
 
     // Parse all achievements up front through both parsers.
-    let mut pairs: Vec<(
-        &AchievementDef,
-        Achievement,
-        AchievementState,
-        Trigger,
-    )> = Vec::new();
+    let mut pairs: Vec<(&AchievementDef, Achievement, AchievementState, Trigger)> = Vec::new();
 
     let mut parse_failures = Vec::new();
     for a in &core {
@@ -496,7 +462,9 @@ fn diff_pokemon_red_all_achievements() {
 
     eprintln!(
         "Running {} core achievements × {} frames on {}...",
-        pairs.len(), frames, pd.title
+        pairs.len(),
+        frames,
+        pd.title
     );
 
     // Run frames, evaluating every achievement through both evaluators.
@@ -506,9 +474,8 @@ fn diff_pokemon_red_all_achievements() {
         gb.run_frame();
 
         for (def, ach, ach_state, oracle_trigger) in pairs.iter_mut() {
-            let ours_triggered = eval_achievement(ach, ach_state, |addr, size| {
-                peek_sized(&gb, addr, size)
-            });
+            let ours_triggered =
+                eval_achievement(ach, ach_state, |addr, size| peek_sized(&gb, addr, size));
 
             let oracle_state = oracle_trigger.evaluate(|addr, n| peek_raw(&gb, addr, n));
             let theirs_triggered = oracle_state == ffi::RC_TRIGGER_STATE_TRIGGERED;
@@ -523,12 +490,17 @@ fn diff_pokemon_red_all_achievements() {
     }
 
     // Report.
-    let triggered_ours: Vec<_> = pairs.iter()
+    let triggered_ours: Vec<_> = pairs
+        .iter()
         .filter(|(_, _, s, _)| s.triggered)
         .map(|(d, _, _, _)| format!("[{}] {}", d.id, d.title))
         .collect();
 
-    eprintln!("Achievements that triggered during {} frames: {}", frames, triggered_ours.len());
+    eprintln!(
+        "Achievements that triggered during {} frames: {}",
+        frames,
+        triggered_ours.len()
+    );
     for t in &triggered_ours {
         eprintln!("  {t}");
     }
@@ -539,12 +511,19 @@ fn diff_pokemon_red_all_achievements() {
         disagreements.len(),
         pairs.len(),
         frames,
-        disagreements.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+        disagreements
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     eprintln!(
         "PASS: {} achievements × {} frames = {} evaluations, zero disagreements",
-        pairs.len(), frames, pairs.len() * frames
+        pairs.len(),
+        frames,
+        pairs.len() * frames
     );
 }
 
@@ -574,7 +553,9 @@ fn diff_pokemon_red_leaderboard_values() {
 
     for lb in &pd.leaderboards {
         // Extract VAL section from the mem string.
-        let val_str = lb.mem.split("::")
+        let val_str = lb
+            .mem
+            .split("::")
             .find(|p| p.starts_with("VAL:"))
             .map(|p| &p[4..]);
         let val_str = match val_str {
@@ -589,7 +570,10 @@ fn diff_pokemon_red_leaderboard_values() {
         let ach = match Achievement::parse(val_str) {
             Ok(a) => a,
             Err(e) => {
-                parse_failures.push(format!("[{}] {} rveevr: {:?}\n  val: {}", lb.id, lb.title, e, val_str));
+                parse_failures.push(format!(
+                    "[{}] {} rveevr: {:?}\n  val: {}",
+                    lb.id, lb.title, e, val_str
+                ));
                 continue;
             }
         };
@@ -603,7 +587,10 @@ fn diff_pokemon_red_leaderboard_values() {
         let oracle = match Value::parse(val_str) {
             Ok(v) => v,
             Err(e) => {
-                parse_failures.push(format!("[{}] {} rcheevos: {:?}\n  val: {}", lb.id, lb.title, e, val_str));
+                parse_failures.push(format!(
+                    "[{}] {} rcheevos: {:?}\n  val: {}",
+                    lb.id, lb.title, e, val_str
+                ));
                 continue;
             }
         };
@@ -626,7 +613,9 @@ fn diff_pokemon_red_leaderboard_values() {
 
     eprintln!(
         "Running {} leaderboard VALUEs × {} frames on {}...",
-        pairs.len(), frames, pd.title
+        pairs.len(),
+        frames,
+        pd.title
     );
 
     let mut disagreements: Vec<String> = Vec::new();
@@ -635,11 +624,9 @@ fn diff_pokemon_red_leaderboard_values() {
         gb.run_frame();
 
         for pair in pairs.iter_mut() {
-            let ours_val = eval_value(
-                &pair.val_condset,
-                &mut pair.val_state,
-                &mut |addr, size| peek_sized(&gb, addr, size),
-            );
+            let ours_val = eval_value(&pair.val_condset, &mut pair.val_state, &mut |addr, size| {
+                peek_sized(&gb, addr, size)
+            });
 
             let theirs_val = pair.oracle.evaluate(|addr, n| peek_raw(&gb, addr, n)) as i64;
 
@@ -658,12 +645,19 @@ fn diff_pokemon_red_leaderboard_values() {
         disagreements.len(),
         pairs.len(),
         frames,
-        disagreements.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+        disagreements
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     eprintln!(
         "PASS: {} leaderboard VALUEs × {} frames = {} evaluations, zero disagreements",
-        pairs.len(), frames, pairs.len() * frames
+        pairs.len(),
+        frames,
+        pairs.len() * frames
     );
 }
 
@@ -692,12 +686,7 @@ fn diff_pokemon_red_gameplay() {
     eprintln!("Skipped intro: {intro_frames} frames consumed");
 
     // --- Parse all achievements ---
-    let mut ach_pairs: Vec<(
-        &AchievementDef,
-        Achievement,
-        AchievementState,
-        Trigger,
-    )> = Vec::new();
+    let mut ach_pairs: Vec<(&AchievementDef, Achievement, AchievementState, Trigger)> = Vec::new();
 
     for a in &core {
         let ours = Achievement::parse(&a.memaddr)
@@ -718,7 +707,9 @@ fn diff_pokemon_red_gameplay() {
 
     let mut lb_pairs: Vec<LbPair2> = Vec::new();
     for lb in &pd.leaderboards {
-        let val_str = lb.mem.split("::")
+        let val_str = lb
+            .mem
+            .split("::")
             .find(|p| p.starts_with("VAL:"))
             .map(|p| &p[4..]);
         let val_str = match val_str {
@@ -743,7 +734,10 @@ fn diff_pokemon_red_gameplay() {
 
     eprintln!(
         "Gameplay differential: {} achievements + {} leaderboards × {} frames on {}",
-        ach_pairs.len(), lb_pairs.len(), eval_frames, pd.title
+        ach_pairs.len(),
+        lb_pairs.len(),
+        eval_frames,
+        pd.title
     );
 
     let mut ach_disagreements: Vec<String> = Vec::new();
@@ -807,9 +801,8 @@ fn diff_pokemon_red_gameplay() {
 
         // Evaluate achievements.
         for (def, ach, ach_state, oracle_trigger) in ach_pairs.iter_mut() {
-            let ours_triggered = eval_achievement(ach, ach_state, |addr, size| {
-                peek_sized(&gb, addr, size)
-            });
+            let ours_triggered =
+                eval_achievement(ach, ach_state, |addr, size| peek_sized(&gb, addr, size));
             let oracle_state = oracle_trigger.evaluate(|addr, n| peek_raw(&gb, addr, n));
             let theirs_triggered = oracle_state == ffi::RC_TRIGGER_STATE_TRIGGERED;
 
@@ -823,11 +816,9 @@ fn diff_pokemon_red_gameplay() {
 
         // Evaluate leaderboard values.
         for pair in lb_pairs.iter_mut() {
-            let ours_val = eval_value(
-                &pair.val_condset,
-                &mut pair.val_state,
-                &mut |addr, size| peek_sized(&gb, addr, size),
-            );
+            let ours_val = eval_value(&pair.val_condset, &mut pair.val_state, &mut |addr, size| {
+                peek_sized(&gb, addr, size)
+            });
             let theirs_val = pair.oracle.evaluate(|addr, n| peek_raw(&gb, addr, n)) as i64;
 
             if ours_val != theirs_val {
@@ -840,11 +831,15 @@ fn diff_pokemon_red_gameplay() {
     }
 
     // Report triggered achievements.
-    let triggered: Vec<_> = ach_pairs.iter()
+    let triggered: Vec<_> = ach_pairs
+        .iter()
         .filter(|(_, _, s, _)| s.triggered)
         .map(|(d, _, _, _)| format!("[{}] {}", d.id, d.title))
         .collect();
-    eprintln!("Achievements triggered during gameplay: {}", triggered.len());
+    eprintln!(
+        "Achievements triggered during gameplay: {}",
+        triggered.len()
+    );
     for t in &triggered {
         eprintln!("  {t}");
     }
@@ -858,7 +853,12 @@ fn diff_pokemon_red_gameplay() {
         "{} achievement disagreements across {} evals:\n{}",
         ach_disagreements.len(),
         total_ach_evals,
-        ach_disagreements.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+        ach_disagreements
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     assert!(
@@ -866,7 +866,12 @@ fn diff_pokemon_red_gameplay() {
         "{} value disagreements across {} evals:\n{}",
         val_disagreements.len(),
         total_val_evals,
-        val_disagreements.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+        val_disagreements
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     eprintln!(

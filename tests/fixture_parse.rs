@@ -53,12 +53,9 @@ struct LeaderboardDef {
 }
 
 fn load_fixture(name: &str) -> PatchData {
-    let path = format!(
-        "{}/tests/fixtures/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let json = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+    let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+    let json =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
     let resp: PatchResponse =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
     resp.patch_data
@@ -78,7 +75,10 @@ fn parse_sml_achievements() {
     let mut failures = Vec::new();
     for a in &core {
         if let Err(e) = Achievement::parse(&a.memaddr) {
-            failures.push(format!("[{}] {}: {:?}\n  memaddr: {}", a.id, a.title, e, a.memaddr));
+            failures.push(format!(
+                "[{}] {}: {:?}\n  memaddr: {}",
+                a.id, a.title, e, a.memaddr
+            ));
         }
     }
     assert!(
@@ -89,7 +89,12 @@ fn parse_sml_achievements() {
         core.len(),
         failures.join("\n")
     );
-    eprintln!("{}: parsed {}/{} core achievements OK", pd.title, core.len(), core.len());
+    eprintln!(
+        "{}: parsed {}/{} core achievements OK",
+        pd.title,
+        core.len(),
+        core.len()
+    );
 }
 
 /// Parse every core achievement from Pokémon Red (91 core).
@@ -102,7 +107,10 @@ fn parse_pokemon_red_achievements() {
     let mut failures = Vec::new();
     for a in &core {
         if let Err(e) = Achievement::parse(&a.memaddr) {
-            failures.push(format!("[{}] {}: {:?}\n  memaddr: {}", a.id, a.title, e, a.memaddr));
+            failures.push(format!(
+                "[{}] {}: {:?}\n  memaddr: {}",
+                a.id, a.title, e, a.memaddr
+            ));
         }
     }
     assert!(
@@ -113,7 +121,12 @@ fn parse_pokemon_red_achievements() {
         core.len(),
         failures.join("\n")
     );
-    eprintln!("{}: parsed {}/{} core achievements OK", pd.title, core.len(), core.len());
+    eprintln!(
+        "{}: parsed {}/{} core achievements OK",
+        pd.title,
+        core.len(),
+        core.len()
+    );
 }
 
 /// Parse every core achievement from Kirby's Dream Land (35 core).
@@ -126,7 +139,10 @@ fn parse_kirby_achievements() {
     let mut failures = Vec::new();
     for a in &core {
         if let Err(e) = Achievement::parse(&a.memaddr) {
-            failures.push(format!("[{}] {}: {:?}\n  memaddr: {}", a.id, a.title, e, a.memaddr));
+            failures.push(format!(
+                "[{}] {}: {:?}\n  memaddr: {}",
+                a.id, a.title, e, a.memaddr
+            ));
         }
     }
     assert!(
@@ -137,13 +153,22 @@ fn parse_kirby_achievements() {
         core.len(),
         failures.join("\n")
     );
-    eprintln!("{}: parsed {}/{} core achievements OK", pd.title, core.len(), core.len());
+    eprintln!(
+        "{}: parsed {}/{} core achievements OK",
+        pd.title,
+        core.len(),
+        core.len()
+    );
 }
 
 /// Parse every leaderboard from all three fixtures.
 #[test]
 fn parse_all_leaderboards() {
-    let fixtures = ["sml_patch.json", "pokemon_red_patch.json", "kirby_patch.json"];
+    let fixtures = [
+        "sml_patch.json",
+        "pokemon_red_patch.json",
+        "kirby_patch.json",
+    ];
     let mut total = 0;
     let mut failures = Vec::new();
 
@@ -174,7 +199,11 @@ fn parse_all_leaderboards() {
 /// Reports stats but only fails on core achievement parse errors.
 #[test]
 fn parse_all_achievements_stats() {
-    let fixtures = ["sml_patch.json", "pokemon_red_patch.json", "kirby_patch.json"];
+    let fixtures = [
+        "sml_patch.json",
+        "pokemon_red_patch.json",
+        "kirby_patch.json",
+    ];
     let mut total = 0;
     let mut core_ok = 0;
     let mut unofficial_ok = 0;
@@ -188,10 +217,18 @@ fn parse_all_achievements_stats() {
             let is_core = a.flags == 3;
             match Achievement::parse(&a.memaddr) {
                 Ok(_) => {
-                    if is_core { core_ok += 1; } else { unofficial_ok += 1; }
+                    if is_core {
+                        core_ok += 1;
+                    } else {
+                        unofficial_ok += 1;
+                    }
                 }
                 Err(_) => {
-                    if is_core { core_fail += 1; } else { unofficial_fail += 1; }
+                    if is_core {
+                        core_fail += 1;
+                    } else {
+                        unofficial_fail += 1;
+                    }
                 }
             }
         }
@@ -200,5 +237,8 @@ fn parse_all_achievements_stats() {
     eprintln!("Total: {total} achievements");
     eprintln!("  Core: {core_ok} ok, {core_fail} failed");
     eprintln!("  Unofficial: {unofficial_ok} ok, {unofficial_fail} failed");
-    assert_eq!(core_fail, 0, "{core_fail} core achievements failed to parse");
+    assert_eq!(
+        core_fail, 0,
+        "{core_fail} core achievements failed to parse"
+    );
 }

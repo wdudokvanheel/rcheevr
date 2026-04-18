@@ -9,6 +9,9 @@
 //! behind `#[cfg(test)]`) so the differential harness and future mock server
 //! can use it from outside unit-test contexts.
 
+use std::future::Future;
+use std::pin::Pin;
+
 // ---------------------------------------------------------------------------
 // TransportError
 // ---------------------------------------------------------------------------
@@ -24,13 +27,19 @@ pub enum TransportError {
 // HttpTransport trait
 // ---------------------------------------------------------------------------
 
-/// Synchronous HTTP transport.  One method: POST form-urlencoded, return bytes.
+pub type TransportFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + 'a>>;
+
+/// Async HTTP transport. One method: POST form-urlencoded, return bytes.
 ///
-/// A future `http-reqwest` feature flag can add a blocking reqwest wrapper;
-/// a future `http-fetch` feature flag can add a wasm `fetch` wrapper.
+/// Native builds can use [`ReqwestTransport`]; wasm builds can provide a fetch
+/// wrapper behind the `http-fetch` feature without changing runtime code.
 pub trait HttpTransport {
     /// POST a form-urlencoded body and return the raw response bytes.
-    fn post_form(&mut self, url: &str, form: &[(&str, &str)]) -> Result<Vec<u8>, TransportError>;
+    fn post_form<'a>(
+        &'a mut self,
+        url: &'a str,
+        form: &'a [(&'a str, &'a str)],
+    ) -> TransportFuture<'a>;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,7 +82,11 @@ pub struct MockCall {
 impl MockTransport {
     /// Create a new strict `MockTransport` with no expectations.
     pub fn new() -> Self {
-        Self { expectations: vec![], calls: vec![], strict: true }
+        Self {
+            expectations: vec![],
+            calls: vec![],
+            strict: true,
+        }
     }
 
     /// Queue a canned expectation.
@@ -89,7 +102,10 @@ impl MockTransport {
     ) {
         self.expectations.push(MockExpectation {
             url_contains: url_contains.to_string(),
-            match_form: match_form.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            match_form: match_form
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             response: response.into(),
         });
     }
@@ -123,7 +139,10 @@ impl MockTransport {
 
     /// Count how many recorded calls contain `url_substr` in their URL.
     pub fn call_count(&self, url_substr: &str) -> usize {
-        self.calls.iter().filter(|c| c.url.contains(url_substr)).count()
+        self.calls
+            .iter()
+            .filter(|c| c.url.contains(url_substr))
+            .count()
     }
 }
 
@@ -134,39 +153,49 @@ impl Default for MockTransport {
 }
 
 impl HttpTransport for MockTransport {
-    fn post_form(&mut self, url: &str, form: &[(&str, &str)]) -> Result<Vec<u8>, TransportError> {
-        // Record the call.
-        self.calls.push(MockCall {
-            url: url.to_string(),
-            form: form.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
-        });
-
-        // Find the first matching expectation.
-        let pos = self.expectations.iter().position(|exp| {
-            url.contains(&exp.url_contains)
-                && exp
-                    .match_form
+    fn post_form<'a>(
+        &'a mut self,
+        url: &'a str,
+        form: &'a [(&'a str, &'a str)],
+    ) -> TransportFuture<'a> {
+        Box::pin(async move {
+            // Record the call.
+            self.calls.push(MockCall {
+                url: url.to_string(),
+                form: form
                     .iter()
-                    .all(|(ek, ev)| form.iter().any(|(fk, fv)| fk == ek && fv == ev))
-        });
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            });
 
-        match pos {
-            Some(idx) => {
-                let exp = self.expectations.remove(idx);
-                Ok(exp.response)
-            }
-            None => {
-                if self.strict {
-                    Err(TransportError::Network(format!(
-                        "no mock expectation matched url={:?} form={:?}",
-                        url,
-                        form.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>()
-                    )))
-                } else {
-                    Ok(vec![])
+            // Find the first matching expectation.
+            let pos = self.expectations.iter().position(|exp| {
+                url.contains(&exp.url_contains)
+                    && exp
+                        .match_form
+                        .iter()
+                        .all(|(ek, ev)| form.iter().any(|(fk, fv)| fk == ek && fv == ev))
+            });
+
+            match pos {
+                Some(idx) => {
+                    let exp = self.expectations.remove(idx);
+                    Ok(exp.response)
+                }
+                None => {
+                    if self.strict {
+                        Err(TransportError::Network(format!(
+                            "no mock expectation matched url={url:?} form={:?}",
+                            form.iter()
+                                .map(|(k, v)| format!("{k}={v}"))
+                                .collect::<Vec<_>>()
+                        )))
+                    } else {
+                        Ok(vec![])
+                    }
                 }
             }
-        }
+        })
     }
 }
 
@@ -179,14 +208,14 @@ impl HttpTransport for MockTransport {
 /// Compiled only when the `http-reqwest` feature is enabled.
 #[cfg(feature = "http-reqwest")]
 pub struct ReqwestTransport {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 #[cfg(feature = "http-reqwest")]
 impl ReqwestTransport {
     /// Build a new transport with a default reqwest client.
     pub fn new() -> Result<Self, TransportError> {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .build()
             .map_err(|e| TransportError::Network(e.to_string()))?;
         Ok(Self { client })
@@ -194,27 +223,35 @@ impl ReqwestTransport {
 
     /// Wrap an existing `reqwest::blocking::Client` (useful for tests that
     /// want custom timeouts, certificates, etc.).
-    pub fn from_client(client: reqwest::blocking::Client) -> Self {
+    pub fn from_client(client: reqwest::Client) -> Self {
         Self { client }
     }
 }
 
 #[cfg(feature = "http-reqwest")]
 impl HttpTransport for ReqwestTransport {
-    fn post_form(&mut self, url: &str, form: &[(&str, &str)]) -> Result<Vec<u8>, TransportError> {
-        let resp = self
-            .client
-            .post(url)
-            .form(form)
-            .send()
-            .map_err(|e| TransportError::Network(e.to_string()))?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(TransportError::Status(status.as_u16()));
-        }
-        resp.bytes()
-            .map(|b| b.to_vec())
-            .map_err(|e| TransportError::Network(e.to_string()))
+    fn post_form<'a>(
+        &'a mut self,
+        url: &'a str,
+        form: &'a [(&'a str, &'a str)],
+    ) -> TransportFuture<'a> {
+        Box::pin(async move {
+            let resp = self
+                .client
+                .post(url)
+                .form(form)
+                .send()
+                .await
+                .map_err(|e| TransportError::Network(e.to_string()))?;
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(TransportError::Status(status.as_u16()));
+            }
+            resp.bytes()
+                .await
+                .map(|b| b.to_vec())
+                .map_err(|e| TransportError::Network(e.to_string()))
+        })
     }
 }
 
@@ -238,12 +275,15 @@ mod tests {
     // Test 1: Single expectation + matching call returns the response.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn single_expectation_matched_returns_response() {
+    #[tokio::test]
+    async fn single_expectation_matched_returns_response() {
         let mut t = MockTransport::new();
         t.expect("login2", &[("r", "login2")], b"ok".to_vec());
 
-        let resp = t.post_form("http://example.com/login2", &[("r", "login2")]).unwrap();
+        let resp = t
+            .post_form("http://example.com/login2", &[("r", "login2")])
+            .await
+            .unwrap();
         assert_eq!(resp, b"ok");
     }
 
@@ -251,14 +291,14 @@ mod tests {
     // Test 2: Multiple sequential expectations consumed in order.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn multiple_expectations_consumed_in_order() {
+    #[tokio::test]
+    async fn multiple_expectations_consumed_in_order() {
         let mut t = MockTransport::new();
         t.expect("login2", &[], b"first".to_vec());
         t.expect("login2", &[], b"second".to_vec());
 
-        let r1 = t.post_form("http://example.com/login2", &[]).unwrap();
-        let r2 = t.post_form("http://example.com/login2", &[]).unwrap();
+        let r1 = t.post_form("http://example.com/login2", &[]).await.unwrap();
+        let r2 = t.post_form("http://example.com/login2", &[]).await.unwrap();
         assert_eq!(r1, b"first");
         assert_eq!(r2, b"second");
     }
@@ -267,15 +307,19 @@ mod tests {
     // Test 3: Form subset matching ignores extra fields in the call.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn form_subset_match_ignores_extra_fields() {
+    #[tokio::test]
+    async fn form_subset_match_ignores_extra_fields() {
         let mut t = MockTransport::new();
         // Expectation only cares about key "r".
         t.expect("endpoint", &[("r", "gameid")], b"matched".to_vec());
 
         // Call includes extra "m" field which should be fine.
         let resp = t
-            .post_form("http://example.com/endpoint", &[("r", "gameid"), ("m", "abc123")])
+            .post_form(
+                "http://example.com/endpoint",
+                &[("r", "gameid"), ("m", "abc123")],
+            )
+            .await
             .unwrap();
         assert_eq!(resp, b"matched");
     }
@@ -284,12 +328,15 @@ mod tests {
     // Test 4: Missing expectation in strict mode → Network error.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn strict_mode_no_match_returns_network_error() {
+    #[tokio::test]
+    async fn strict_mode_no_match_returns_network_error() {
         let mut t = MockTransport::new();
         // No expectations queued.
 
-        let err = t.post_form("http://example.com/foo", &[("r", "ping")]).unwrap_err();
+        let err = t
+            .post_form("http://example.com/foo", &[("r", "ping")])
+            .await
+            .unwrap_err();
         assert!(matches!(err, TransportError::Network(_)));
     }
 
@@ -297,12 +344,14 @@ mod tests {
     // Test 5: assert_called panics on no match; passes on match.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn assert_called_passes_when_call_recorded() {
+    #[tokio::test]
+    async fn assert_called_passes_when_call_recorded() {
         let mut t = MockTransport::new();
         t.strict = false; // non-strict so we don't need to queue expectations
 
-        t.post_form("http://example.com/award", &[("r", "award"), ("a", "42")]).unwrap();
+        t.post_form("http://example.com/award", &[("r", "award"), ("a", "42")])
+            .await
+            .unwrap();
 
         // Should not panic.
         t.assert_called("award", &[("r", "award"), ("a", "42")]);
@@ -320,14 +369,14 @@ mod tests {
     // Test 6: call_count returns correct count.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn call_count_counts_url_matches() {
+    #[tokio::test]
+    async fn call_count_counts_url_matches() {
         let mut t = MockTransport::new();
         t.strict = false;
 
-        t.post_form("http://example.com/ping", &[]).unwrap();
-        t.post_form("http://example.com/ping", &[]).unwrap();
-        t.post_form("http://example.com/award", &[]).unwrap();
+        t.post_form("http://example.com/ping", &[]).await.unwrap();
+        t.post_form("http://example.com/ping", &[]).await.unwrap();
+        t.post_form("http://example.com/award", &[]).await.unwrap();
 
         assert_eq!(t.call_count("ping"), 2);
         assert_eq!(t.call_count("award"), 1);
@@ -338,12 +387,15 @@ mod tests {
     // Test 7: Non-strict mode returns empty bytes on no match.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn non_strict_returns_empty_on_no_match() {
+    #[tokio::test]
+    async fn non_strict_returns_empty_on_no_match() {
         let mut t = MockTransport::new();
         t.strict = false;
 
-        let resp = t.post_form("http://example.com/whatever", &[("r", "unknown")]).unwrap();
+        let resp = t
+            .post_form("http://example.com/whatever", &[("r", "unknown")])
+            .await
+            .unwrap();
         assert!(resp.is_empty());
     }
 
@@ -351,12 +403,12 @@ mod tests {
     // Test 8: expect_json convenience helper.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn expect_json_returns_json_bytes() {
+    #[tokio::test]
+    async fn expect_json_returns_json_bytes() {
         let mut t = MockTransport::new();
         t.expect_json("login2", &[], json!({"Success": true, "Token": "tok"}));
 
-        let bytes = t.post_form("http://example.com/login2", &[]).unwrap();
+        let bytes = t.post_form("http://example.com/login2", &[]).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["Token"], "tok");
     }
@@ -368,7 +420,6 @@ mod tests {
     #[cfg(feature = "http-reqwest")]
     #[test]
     fn reqwest_transport_new_does_not_panic() {
-        let _t = super::ReqwestTransport::new()
-            .expect("ReqwestTransport::new() should succeed");
+        let _t = super::ReqwestTransport::new().expect("ReqwestTransport::new() should succeed");
     }
 }

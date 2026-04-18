@@ -103,13 +103,20 @@ pub struct ConditionParseError {
 
 impl From<ParseError> for ConditionParseError {
     fn from(e: ParseError) -> Self {
-        Self { pos: e.pos, msg: e.msg }
+        Self {
+            pos: e.pos,
+            msg: e.msg,
+        }
     }
 }
 
 impl std::fmt::Display for ConditionParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "condition parse error at byte {}: {}", self.pos, self.msg)
+        write!(
+            f,
+            "condition parse error at byte {}: {}",
+            self.pos, self.msg
+        )
     }
 }
 
@@ -233,10 +240,15 @@ fn parse_condition(s: &str, _base_offset: usize) -> Result<Condition, ConditionP
     // 2. LHS operand
     // ------------------------------------------------------------------
     if pos >= b.len() {
-        return Err(ConditionParseError { pos, msg: "expected LHS operand" });
+        return Err(ConditionParseError {
+            pos,
+            msg: "expected LHS operand",
+        });
     }
-    let (lhs, consumed) =
-        parse_operand(&s[pos..]).map_err(|e| ConditionParseError { pos: pos + e.pos, msg: e.msg })?;
+    let (lhs, consumed) = parse_operand(&s[pos..]).map_err(|e| ConditionParseError {
+        pos: pos + e.pos,
+        msg: e.msg,
+    })?;
     pos += consumed;
 
     // ------------------------------------------------------------------
@@ -267,8 +279,11 @@ fn parse_condition(s: &str, _base_offset: usize) -> Result<Condition, ConditionP
             // No rhs — just hit count
             Operand::ConstInt(0)
         } else {
-            let (rhs_op, rhs_consumed) = parse_operand(&s[pos..])
-                .map_err(|e| ConditionParseError { pos: pos + e.pos, msg: e.msg })?;
+            let (rhs_op, rhs_consumed) =
+                parse_operand(&s[pos..]).map_err(|e| ConditionParseError {
+                    pos: pos + e.pos,
+                    msg: e.msg,
+                })?;
             pos += rhs_consumed;
             rhs_op
         }
@@ -285,7 +300,13 @@ fn parse_condition(s: &str, _base_offset: usize) -> Result<Condition, ConditionP
         0
     };
 
-    Ok(Condition { flag, lhs, op, rhs, required_hits })
+    Ok(Condition {
+        flag,
+        lhs,
+        op,
+        rhs,
+        required_hits,
+    })
 }
 
 /// Map a flag letter (already uppercased) to a `ConditionFlag`.
@@ -305,7 +326,10 @@ fn parse_flag(c: u8, _pos: usize) -> Result<ConditionFlag, ConditionParseError> 
         b'T' => Ok(ConditionFlag::Trigger),
         b'I' => Ok(ConditionFlag::AddAddress),
         b'K' => Ok(ConditionFlag::Remember),
-        _ => Err(ConditionParseError { pos: 0, msg: "unknown condition flag letter" }),
+        _ => Err(ConditionParseError {
+            pos: 0,
+            msg: "unknown condition flag letter",
+        }),
     }
 }
 
@@ -325,7 +349,10 @@ fn parse_op(s: &str) -> Result<(CompareOp, usize), ConditionParseError> {
         Some(b'&') => Ok((CompareOp::BitwiseAnd, 1)),
         Some(b'^') => Ok((CompareOp::BitwiseXor, 1)),
         Some(b'%') => Ok((CompareOp::Modulo, 1)),
-        _ => Err(ConditionParseError { pos: 0, msg: "expected operator" }),
+        _ => Err(ConditionParseError {
+            pos: 0,
+            msg: "expected operator",
+        }),
     }
 }
 
@@ -343,12 +370,17 @@ fn parse_hit_count(s: &str, pos: &mut usize) -> Result<u32, ConditionParseError>
                 *pos += 1;
             }
             if *pos == digit_start {
-                return Err(ConditionParseError { pos: start, msg: "expected digits in hit count" });
+                return Err(ConditionParseError {
+                    pos: start,
+                    msg: "expected digits in hit count",
+                });
             }
-            let n: u32 = s[digit_start..*pos].parse().map_err(|_| ConditionParseError {
-                pos: digit_start,
-                msg: "hit count out of range",
-            })?;
+            let n: u32 = s[digit_start..*pos]
+                .parse()
+                .map_err(|_| ConditionParseError {
+                    pos: digit_start,
+                    msg: "hit count out of range",
+                })?;
             // Consume the closing '.'
             if b.get(*pos) == Some(&b'.') {
                 *pos += 1;
@@ -363,12 +395,17 @@ fn parse_hit_count(s: &str, pos: &mut usize) -> Result<u32, ConditionParseError>
                 *pos += 1;
             }
             if *pos == digit_start {
-                return Err(ConditionParseError { pos: start, msg: "expected digits in hit count" });
+                return Err(ConditionParseError {
+                    pos: start,
+                    msg: "expected digits in hit count",
+                });
             }
-            let n: u32 = s[digit_start..*pos].parse().map_err(|_| ConditionParseError {
-                pos: digit_start,
-                msg: "hit count out of range",
-            })?;
+            let n: u32 = s[digit_start..*pos]
+                .parse()
+                .map_err(|_| ConditionParseError {
+                    pos: digit_start,
+                    msg: "hit count out of range",
+                })?;
             // Consume the closing ')'
             if b.get(*pos) == Some(&b')') {
                 *pos += 1;
@@ -396,11 +433,16 @@ mod tests {
     }
 
     fn ach(s: &str) -> Achievement {
-        Achievement::parse(s).unwrap_or_else(|e| panic!("Achievement::parse({:?}) failed: {}", s, e))
+        Achievement::parse(s)
+            .unwrap_or_else(|e| panic!("Achievement::parse({:?}) failed: {}", s, e))
     }
 
     fn mem_operand(kind: OperandKind, size: MemSize, addr: u32) -> Operand {
-        Operand::Memory { kind, size, address: addr }
+        Operand::Memory {
+            kind,
+            size,
+            address: addr,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -605,22 +647,34 @@ mod tests {
     #[test]
     fn lhs_memory_rhs_const() {
         let c = cond("0xH1234=5");
-        assert_eq!(c.lhs, mem_operand(OperandKind::Address, MemSize::Byte, 0x1234));
+        assert_eq!(
+            c.lhs,
+            mem_operand(OperandKind::Address, MemSize::Byte, 0x1234)
+        );
         assert_eq!(c.rhs, Operand::ConstInt(5));
     }
 
     #[test]
     fn lhs_delta_rhs_memory() {
         let c = cond("d0xH5000>0xH5000");
-        assert_eq!(c.lhs, mem_operand(OperandKind::Delta, MemSize::Byte, 0x5000));
-        assert_eq!(c.rhs, mem_operand(OperandKind::Address, MemSize::Byte, 0x5000));
+        assert_eq!(
+            c.lhs,
+            mem_operand(OperandKind::Delta, MemSize::Byte, 0x5000)
+        );
+        assert_eq!(
+            c.rhs,
+            mem_operand(OperandKind::Address, MemSize::Byte, 0x5000)
+        );
         assert_eq!(c.op, CompareOp::Greater);
     }
 
     #[test]
     fn lhs_prior() {
         let c = cond("p0xH6000!=1");
-        assert_eq!(c.lhs, mem_operand(OperandKind::Prior, MemSize::Byte, 0x6000));
+        assert_eq!(
+            c.lhs,
+            mem_operand(OperandKind::Prior, MemSize::Byte, 0x6000)
+        );
         assert_eq!(c.op, CompareOp::NotEqual);
     }
 
@@ -709,7 +763,10 @@ mod tests {
         assert!(a.alts.is_empty());
         // Check that the lhs is a Bit6 memory ref
         match &a.core.conditions[0].lhs {
-            Operand::Memory { size: crate::memaddr::MemSize::Bit6, .. } => {}
+            Operand::Memory {
+                size: crate::memaddr::MemSize::Bit6,
+                ..
+            } => {}
             other => panic!("expected Bit6 memory, got {:?}", other),
         }
     }

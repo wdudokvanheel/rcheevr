@@ -5,9 +5,8 @@
 
 use crate::condition::{Achievement, CompareOp, ConditionFlag, ConditionParseError, Condset};
 use crate::evaluator::{
-    AchievementState, ConditionState, CondsetState, TypedValue, eval_achievement,
-    base_read_size, transform_memref_value, bcd_decode, size_mask,
-    is_float_size, wrap_value,
+    base_read_size, bcd_decode, eval_achievement, is_float_size, size_mask, transform_memref_value,
+    wrap_value, AchievementState, ConditionState, CondsetState, TypedValue,
 };
 use crate::memaddr::{MemSize, Operand, OperandKind};
 
@@ -91,11 +90,21 @@ impl ValueFormat {
             }
             ValueFormat::Fixed2 => {
                 let abs = v.unsigned_abs();
-                format!("{}{}.{:02}", if v < 0 { "-" } else { "" }, abs / 100, abs % 100)
+                format!(
+                    "{}{}.{:02}",
+                    if v < 0 { "-" } else { "" },
+                    abs / 100,
+                    abs % 100
+                )
             }
             ValueFormat::Fixed3 => {
                 let abs = v.unsigned_abs();
-                format!("{}{}.{:03}", if v < 0 { "-" } else { "" }, abs / 1000, abs % 1000)
+                format!(
+                    "{}{}.{:03}",
+                    if v < 0 { "-" } else { "" },
+                    abs / 1000,
+                    abs % 1000
+                )
             }
         }
     }
@@ -160,12 +169,22 @@ impl Leaderboard {
             }
         }
 
-        let start = start.ok_or(ConditionParseError { pos: 0, msg: "missing STA: section" })?;
-        let cancel =
-            cancel.ok_or(ConditionParseError { pos: 0, msg: "missing CAN: section" })?;
-        let submit =
-            submit.ok_or(ConditionParseError { pos: 0, msg: "missing SUB: section" })?;
-        let value = value.ok_or(ConditionParseError { pos: 0, msg: "missing VAL: section" })?;
+        let start = start.ok_or(ConditionParseError {
+            pos: 0,
+            msg: "missing STA: section",
+        })?;
+        let cancel = cancel.ok_or(ConditionParseError {
+            pos: 0,
+            msg: "missing CAN: section",
+        })?;
+        let submit = submit.ok_or(ConditionParseError {
+            pos: 0,
+            msg: "missing SUB: section",
+        })?;
+        let value = value.ok_or(ConditionParseError {
+            pos: 0,
+            msg: "missing VAL: section",
+        })?;
 
         Ok((start, cancel, submit, value))
     }
@@ -184,10 +203,22 @@ impl Leaderboard {
             id,
             title: title.into(),
             description: description.into(),
-            start: Achievement { core: start, alts: vec![] },
-            cancel: Achievement { core: cancel, alts: vec![] },
-            submit: Achievement { core: submit, alts: vec![] },
-            value: Achievement { core: value, alts: vec![] },
+            start: Achievement {
+                core: start,
+                alts: vec![],
+            },
+            cancel: Achievement {
+                core: cancel,
+                alts: vec![],
+            },
+            submit: Achievement {
+                core: submit,
+                alts: vec![],
+            },
+            value: Achievement {
+                core: value,
+                alts: vec![],
+            },
             format,
         })
     }
@@ -266,7 +297,10 @@ pub fn eval_leaderboard<F: FnMut(u32, MemSize) -> u32>(
         cs: &mut CondsetState,
         peek: &mut F2,
     ) -> bool {
-        let ach = Achievement { core: condset.clone(), alts: vec![] };
+        let ach = Achievement {
+            core: condset.clone(),
+            alts: vec![],
+        };
         let mut ast = AchievementState {
             core: cs.clone(),
             alts: vec![],
@@ -316,7 +350,10 @@ pub fn eval_leaderboard<F: FnMut(u32, MemSize) -> u32>(
     if submit_fired {
         let val = eval_value(&lb.value.core, &mut state.value_state, &mut peek);
         state.active = false;
-        return Some(LeaderboardEvent::Submitted { id: lb.id, value: val });
+        return Some(LeaderboardEvent::Submitted {
+            id: lb.id,
+            value: val,
+        });
     }
 
     // ------------------------------------------------------------------
@@ -439,8 +476,11 @@ pub fn eval_value<F: FnMut(u32, MemSize) -> u32>(
             ConditionFlag::AddHits => {
                 // Evaluate condition, increment hit count if true, add to add_hits.
                 let cond_true = compare_typed(lhs_val, cond.op, rhs_val);
-                let chain_ok = if or_next { or_next || cond_true }
-                               else { and_next && cond_true };
+                let chain_ok = if or_next {
+                    or_next || cond_true
+                } else {
+                    and_next && cond_true
+                };
                 if chain_ok {
                     cs.hit_count += 1;
                 }
@@ -450,8 +490,11 @@ pub fn eval_value<F: FnMut(u32, MemSize) -> u32>(
             }
             ConditionFlag::SubHits => {
                 let cond_true = compare_typed(lhs_val, cond.op, rhs_val);
-                let chain_ok = if or_next { or_next || cond_true }
-                               else { and_next && cond_true };
+                let chain_ok = if or_next {
+                    or_next || cond_true
+                } else {
+                    and_next && cond_true
+                };
                 if chain_ok {
                     cs.hit_count += 1;
                 }
@@ -462,14 +505,21 @@ pub fn eval_value<F: FnMut(u32, MemSize) -> u32>(
             ConditionFlag::Measured if is_comparison(cond.op) => {
                 // Tally mode: count hits of this comparison.
                 let cond_true = compare_typed(lhs_val, cond.op, rhs_val);
-                let chain_ok = if or_next { or_next || cond_true }
-                               else { and_next && cond_true };
+                let chain_ok = if or_next {
+                    or_next || cond_true
+                } else {
+                    and_next && cond_true
+                };
                 if chain_ok {
                     cs.hit_count += 1;
                 }
                 // Total hits = own hits + add_hits (from AddHits/SubHits), clamped >= 0.
                 let signed_hits = cs.hit_count as i32 + add_hits;
-                let total_hits = if signed_hits >= 0 { signed_hits as u32 } else { 0 };
+                let total_hits = if signed_hits >= 0 {
+                    signed_hits as u32
+                } else {
+                    0
+                };
                 add_hits = 0;
                 and_next = true;
                 or_next = false;
@@ -493,8 +543,11 @@ pub fn eval_value<F: FnMut(u32, MemSize) -> u32>(
             ConditionFlag::MeasuredIf => {
                 // MeasuredIf gates whether the measured value is reported.
                 let cond_true = compare_typed(lhs_val, cond.op, rhs_val);
-                let chain_ok = if or_next { or_next || cond_true }
-                               else { and_next && cond_true };
+                let chain_ok = if or_next {
+                    or_next || cond_true
+                } else {
+                    and_next && cond_true
+                };
                 can_measure = can_measure && chain_ok;
                 and_next = true;
                 or_next = false;
@@ -573,7 +626,11 @@ fn resolve_val_lhs<F: FnMut(u32, MemSize) -> u32>(
     peek: &mut F,
 ) -> TypedValue {
     match op {
-        Operand::Memory { kind, size, address } => {
+        Operand::Memory {
+            kind,
+            size,
+            address,
+        } => {
             let addr = address.wrapping_add(indirect_offset);
             let is_float = is_float_size(*size);
             match kind {
@@ -582,20 +639,36 @@ fn resolve_val_lhs<F: FnMut(u32, MemSize) -> u32>(
                     wrap_value(transform_memref_value(raw, *size), *size)
                 }
                 OperandKind::Delta => {
-                    if is_float { TypedValue::Float(f32::from_bits(prev)) } else { TypedValue::Unsigned(prev) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(prev))
+                    } else {
+                        TypedValue::Unsigned(prev)
+                    }
                 }
                 OperandKind::Prior => {
-                    if is_float { TypedValue::Float(f32::from_bits(cs.prior_value)) } else { TypedValue::Unsigned(cs.prior_value) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(cs.prior_value))
+                    } else {
+                        TypedValue::Unsigned(cs.prior_value)
+                    }
                 }
                 OperandKind::Bcd => {
                     let raw = peek(addr, base_read_size(*size));
                     let val = transform_memref_value(raw, *size);
-                    if is_float { TypedValue::Float(f32::from_bits(val)) } else { TypedValue::Unsigned(bcd_decode(val)) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(val))
+                    } else {
+                        TypedValue::Unsigned(bcd_decode(val))
+                    }
                 }
                 OperandKind::Inverted => {
                     let raw = peek(addr, base_read_size(*size));
                     let val = transform_memref_value(raw, *size);
-                    if is_float { TypedValue::Float(f32::from_bits(val)) } else { TypedValue::Unsigned(!val & size_mask(*size)) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(val))
+                    } else {
+                        TypedValue::Unsigned(!val & size_mask(*size))
+                    }
                 }
                 OperandKind::Recall => remember_val,
             }
@@ -706,8 +779,20 @@ fn apply_val_modifier_typed(lhs: TypedValue, op: CompareOp, rhs: TypedValue) -> 
                 let b = rhs.to_f32();
                 TypedValue::Float(match op {
                     CompareOp::Multiply => a * b,
-                    CompareOp::Divide => if b == 0.0 { 0.0 } else { a / b },
-                    CompareOp::Modulo => if b == 0.0 { 0.0 } else { a % b },
+                    CompareOp::Divide => {
+                        if b == 0.0 {
+                            0.0
+                        } else {
+                            a / b
+                        }
+                    }
+                    CompareOp::Modulo => {
+                        if b == 0.0 {
+                            0.0
+                        } else {
+                            a % b
+                        }
+                    }
                     _ => a,
                 })
             } else {
@@ -715,15 +800,26 @@ fn apply_val_modifier_typed(lhs: TypedValue, op: CompareOp, rhs: TypedValue) -> 
                 let b = rhs.to_u32();
                 TypedValue::Unsigned(match op {
                     CompareOp::Multiply => a.wrapping_mul(b),
-                    CompareOp::Divide => if b == 0 { 0 } else { a / b },
-                    CompareOp::Modulo => if b == 0 { 0 } else { a % b },
+                    CompareOp::Divide => {
+                        if b == 0 {
+                            0
+                        } else {
+                            a / b
+                        }
+                    }
+                    CompareOp::Modulo => {
+                        if b == 0 {
+                            0
+                        } else {
+                            a % b
+                        }
+                    }
                     _ => a,
                 })
             }
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -939,8 +1035,7 @@ mod tests {
     #[test]
     fn val_single_operand() {
         let (_, _, _, val) =
-            Leaderboard::parse("STA:0xH0000=1::CAN:0xH0000=0::SUB:0xH0000=1::VAL:0xH5000")
-                .unwrap();
+            Leaderboard::parse("STA:0xH0000=1::CAN:0xH0000=0::SUB:0xH0000=1::VAL:0xH5000").unwrap();
         let mut cs = CondsetState {
             cond_states: vec![ConditionState::default(); val.conditions.len()],
             ..Default::default()
@@ -990,8 +1085,8 @@ mod tests {
         };
         let mut mem = Mem::new(0x10000);
         mem.write(0x5000, 100); // +100
-        mem.write(0x5001, 30);  // -30
-        mem.write(0x5002, 5);   // terminal +5
+        mem.write(0x5001, 30); // -30
+        mem.write(0x5002, 5); // terminal +5
         let v = eval_value(&val, &mut cs, &mut mem.peek_fn());
         assert_eq!(v, 75); // 100 - 30 + 5 = 75
     }

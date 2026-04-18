@@ -104,7 +104,6 @@ impl MockRaServer {
             .map(|(_, form)| form.clone())
             .collect()
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +117,11 @@ async fn handler(
     let request_type = form.get("r").cloned().unwrap_or_default();
 
     // Record the call before checking the password so all calls are visible.
-    state.lock().unwrap().calls.push((request_type.clone(), form.clone()));
+    state
+        .lock()
+        .unwrap()
+        .calls
+        .push((request_type.clone(), form.clone()));
 
     match request_type.as_str() {
         "login2" => {
@@ -222,15 +225,17 @@ fn make_runtime(url: String) -> AchievementRuntime<ReqwestTransport> {
 // Test 1: login → load_rom → peek_from → Unlocked event + awardachievement call
 // ---------------------------------------------------------------------------
 
-#[test]
-fn login_then_load_rom_then_peek_flow() {
+#[tokio::test]
+async fn login_then_load_rom_then_peek_flow() {
     let server = MockRaServer::start();
     let url = server.url();
 
     let mut rt = make_runtime(url);
 
     // Login.
-    rt.login_password("tester", "pw").expect("login failed");
+    rt.login_password("tester", "pw")
+        .await
+        .expect("login failed");
 
     // Load a non-zero ROM (so gameid returns 1, not 0).
     let rom: Vec<u8> = {
@@ -238,10 +243,15 @@ fn login_then_load_rom_then_peek_flow() {
         v[0] = 0xff; // MD5 will differ from the all-zeros sentinel
         v
     };
-    rt.load_rom(&rom).expect("load_rom failed");
+    rt.load_rom(&rom).await.expect("load_rom failed");
 
-    // Frame 1: address 0 = 1 → achievement 10 triggers (MemAddr: "0xH0000=1").
-    rt.peek_from(|addr, _size| if addr == 0 { 1 } else { 0 });
+    // Frame 1: address 0 = 0 → exits WAITING.
+    rt.peek_from(|_addr, _size| 0).await;
+    assert!(rt.drain_events().next().is_none());
+
+    // Frame 2: address 0 = 1 → achievement 10 triggers (MemAddr: "0xH0000=1").
+    rt.peek_from(|addr, _size| if addr == 0 { 1 } else { 0 })
+        .await;
 
     // Exactly one Unlocked event for id 10.
     let events: Vec<_> = rt.drain_events().collect();
@@ -267,8 +277,9 @@ fn login_then_load_rom_then_peek_flow() {
     let awarded = server.awarded_ids();
     assert_eq!(awarded, vec![10], "server did not record award for id=10");
 
-    // Frame 2: same memory — must NOT re-award.
-    rt.peek_from(|addr, _size| if addr == 0 { 1 } else { 0 });
+    // Frame 3: same memory — must NOT re-award.
+    rt.peek_from(|addr, _size| if addr == 0 { 1 } else { 0 })
+        .await;
     let events2: Vec<_> = rt.drain_events().collect();
     assert!(
         !events2
@@ -284,14 +295,17 @@ fn login_then_load_rom_then_peek_flow() {
 // Test 2: login with wrong password → RuntimeError::Api
 // ---------------------------------------------------------------------------
 
-#[test]
-fn login_failure_propagates() {
+#[tokio::test]
+async fn login_failure_propagates() {
     let server = MockRaServer::start();
     let url = server.url();
 
     let mut rt = make_runtime(url);
 
-    let err = rt.login_password("tester", "wrong").expect_err("expected login failure");
+    let err = rt
+        .login_password("tester", "wrong")
+        .await
+        .expect_err("expected login failure");
 
     assert!(
         matches!(err, rveevr::client::RuntimeError::Api(_)),
@@ -306,18 +320,23 @@ fn login_failure_propagates() {
 // Test 3: unknown game (GameID 0) → RuntimeError::Api
 // ---------------------------------------------------------------------------
 
-#[test]
-fn unknown_game_returns_error() {
+#[tokio::test]
+async fn unknown_game_returns_error() {
     let server = MockRaServer::start();
     let url = server.url();
 
     let mut rt = make_runtime(url);
 
-    rt.login_password("tester", "pw").expect("login failed");
+    rt.login_password("tester", "pw")
+        .await
+        .expect("login failed");
 
     // All-zeros 16-byte ROM → MD5 "4ae71336e44bf9bf79d2752e234818a5" → GameID 0.
     let rom = vec![0u8; 16];
-    let err = rt.load_rom(&rom).expect_err("expected load_rom to fail for unknown game");
+    let err = rt
+        .load_rom(&rom)
+        .await
+        .expect_err("expected load_rom to fail for unknown game");
 
     assert!(
         matches!(err, rveevr::client::RuntimeError::Api(_)),
@@ -332,25 +351,27 @@ fn unknown_game_returns_error() {
 // Test 4: ping is sent after enough frames
 // ---------------------------------------------------------------------------
 
-#[test]
-fn ping_sent_after_enough_frames() {
+#[tokio::test]
+async fn ping_sent_after_enough_frames() {
     let server = MockRaServer::start();
     let url = server.url();
 
     let mut rt = make_runtime(url);
 
-    rt.login_password("tester", "pw").expect("login failed");
+    rt.login_password("tester", "pw")
+        .await
+        .expect("login failed");
 
     let rom: Vec<u8> = {
         let mut v = vec![0u8; 16];
         v[0] = 0xab;
         v
     };
-    rt.load_rom(&rom).expect("load_rom failed");
+    rt.load_rom(&rom).await.expect("load_rom failed");
 
     // Drive 121 frames — ping fires after 120.
     for _ in 0..121 {
-        rt.peek_from(|_addr, _size| 0);
+        rt.peek_from(|_addr, _size| 0).await;
         let _ = rt.drain_events().count();
     }
 

@@ -87,7 +87,13 @@ impl AchievementState {
                 ..Default::default()
             })
             .collect();
-        Self { core, alts, triggered: false, waiting_for_trigger_flag: false, waiting: true }
+        Self {
+            core,
+            alts,
+            triggered: false,
+            waiting_for_trigger_flag: false,
+            waiting: true,
+        }
     }
 }
 
@@ -220,7 +226,14 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
         // Always peek the raw current memory so delta/prior state stays accurate.
         let raw_current = peek_current(&cond.lhs, indirect_offset, peek);
         let prev_lhs = raw_current.map_or(0, |curr| update_delta(cs, curr));
-        let lhs_val = resolve_comparison_lhs(&cond.lhs, cs, prev_lhs, indirect_offset, TypedValue::Unsigned(0), peek);
+        let lhs_val = resolve_comparison_lhs(
+            &cond.lhs,
+            cs,
+            prev_lhs,
+            indirect_offset,
+            TypedValue::Unsigned(0),
+            peek,
+        );
         let rhs_val = read_operand_static(&cond.rhs, peek);
         let passes = lhs_val.typed_compare(cond.op, rhs_val);
         if passes {
@@ -295,7 +308,13 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
             if cond.flag == ConditionFlag::ResetNextIf {
                 let cs = &state.cond_states[i];
                 // For the pre-scan we only need the current comparison value.
-                let lhs_val = resolve_comparison_lhs_static(&cond.lhs, cs, indirect_offset, TypedValue::Unsigned(0), peek);
+                let lhs_val = resolve_comparison_lhs_static(
+                    &cond.lhs,
+                    cs,
+                    indirect_offset,
+                    TypedValue::Unsigned(0),
+                    peek,
+                );
                 let rhs_val = read_operand_static(&cond.rhs, peek);
                 if lhs_val.typed_compare(cond.op, rhs_val) {
                     // In rcheevos, reset_next passes through modifier
@@ -307,7 +326,9 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
                             ConditionFlag::AddSource
                             | ConditionFlag::SubSource
                             | ConditionFlag::AddAddress
-                            | ConditionFlag::Remember => { j += 1; }
+                            | ConditionFlag::Remember => {
+                                j += 1;
+                            }
                             _ => break,
                         }
                     }
@@ -350,7 +371,8 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
         // (which is the correct "delta" comparison value for this frame).
         let prev_lhs = raw_current.map_or(0, |curr| update_delta(cs, curr));
         // Step 3: Resolve the actual comparison value from the operand kind.
-        let raw_lhs = resolve_comparison_lhs(&cond.lhs, cs, prev_lhs, indirect_offset, remember_val, peek);
+        let raw_lhs =
+            resolve_comparison_lhs(&cond.lhs, cs, prev_lhs, indirect_offset, remember_val, peek);
         // RHS uses the same condition state so that Delta/Prior on the RHS
         // (e.g. `0xH0000>d0xH0000`) returns the correct previous-frame value.
         let raw_rhs = read_operand_rhs(&cond.rhs, cs, prev_lhs, remember_val, peek);
@@ -460,7 +482,11 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
                 indirect_offset = 0;
 
                 let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
-                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
+                let passes = if forced_false {
+                    false
+                } else {
+                    apply_gate(cmp, and_next, in_or_next, or_next_active)
+                };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
                 if passes {
                     cs.hit_count += 1;
@@ -482,7 +508,11 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
                 indirect_offset = 0;
 
                 let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
-                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
+                let passes = if forced_false {
+                    false
+                } else {
+                    apply_gate(cmp, and_next, in_or_next, or_next_active)
+                };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
                 if passes {
                     cs.hit_count += 1;
@@ -506,7 +536,11 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
                 indirect_offset = 0;
 
                 let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
-                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
+                let passes = if forced_false {
+                    false
+                } else {
+                    apply_gate(cmp, and_next, in_or_next, or_next_active)
+                };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
 
                 let fires = if cond.required_hits == 0 {
@@ -541,7 +575,11 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
                 indirect_offset = 0;
 
                 let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
-                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
+                let passes = if forced_false {
+                    false
+                } else {
+                    apply_gate(cmp, and_next, in_or_next, or_next_active)
+                };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
                 if passes {
                     cs.hit_count += 1;
@@ -579,7 +617,11 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
                 indirect_offset = 0;
 
                 let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
-                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
+                let passes = if forced_false {
+                    false
+                } else {
+                    apply_gate(cmp, and_next, in_or_next, or_next_active)
+                };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
 
                 if passes {
@@ -615,7 +657,11 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
                 indirect_offset = 0;
 
                 let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
-                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
+                let passes = if forced_false {
+                    false
+                } else {
+                    apply_gate(cmp, and_next, in_or_next, or_next_active)
+                };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
                 if passes {
                     if cond.required_hits == 0 {
@@ -645,7 +691,11 @@ fn eval_condset<F: FnMut(u32, MemSize) -> u32>(
                 indirect_offset = 0;
 
                 let cmp = effective_lhs.typed_compare(cond.op, raw_rhs);
-                let passes = if forced_false { false } else { apply_gate(cmp, and_next, in_or_next, or_next_active) };
+                let passes = if forced_false {
+                    false
+                } else {
+                    apply_gate(cmp, and_next, in_or_next, or_next_active)
+                };
                 reset_and_or(&mut and_next, &mut in_or_next, &mut or_next_active);
 
                 // Always increment terminal's own hit count when condition
@@ -768,7 +818,11 @@ fn resolve_comparison_lhs<F: FnMut(u32, MemSize) -> u32>(
     peek: &mut F,
 ) -> TypedValue {
     match op {
-        Operand::Memory { kind, size, address } => {
+        Operand::Memory {
+            kind,
+            size,
+            address,
+        } => {
             let addr = address.wrapping_add(indirect_offset);
             let is_float = is_float_size(*size);
             match kind {
@@ -777,22 +831,38 @@ fn resolve_comparison_lhs<F: FnMut(u32, MemSize) -> u32>(
                     wrap_value(transform_memref_value(raw, *size), *size)
                 }
                 OperandKind::Delta => {
-                    if is_float { TypedValue::Float(f32::from_bits(prev_lhs)) } else { TypedValue::Unsigned(prev_lhs) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(prev_lhs))
+                    } else {
+                        TypedValue::Unsigned(prev_lhs)
+                    }
                 }
                 OperandKind::Prior => {
-                    if is_float { TypedValue::Float(f32::from_bits(cs.prior_value)) } else { TypedValue::Unsigned(cs.prior_value) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(cs.prior_value))
+                    } else {
+                        TypedValue::Unsigned(cs.prior_value)
+                    }
                 }
                 OperandKind::Bcd => {
                     let raw = peek(addr, base_read_size(*size));
                     let val = transform_memref_value(raw, *size);
                     // rcheevos skips BCD for float types
-                    if is_float { TypedValue::Float(f32::from_bits(val)) } else { TypedValue::Unsigned(bcd_decode(val)) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(val))
+                    } else {
+                        TypedValue::Unsigned(bcd_decode(val))
+                    }
                 }
                 OperandKind::Inverted => {
                     let raw = peek(addr, base_read_size(*size));
                     let val = transform_memref_value(raw, *size);
                     // rcheevos skips Invert for float types
-                    if is_float { TypedValue::Float(f32::from_bits(val)) } else { TypedValue::Unsigned(!val & size_mask(*size)) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(val))
+                    } else {
+                        TypedValue::Unsigned(!val & size_mask(*size))
+                    }
                 }
                 OperandKind::Recall => remember_val,
             }
@@ -812,7 +882,11 @@ fn resolve_comparison_lhs_static<F: FnMut(u32, MemSize) -> u32>(
     peek: &mut F,
 ) -> TypedValue {
     match op {
-        Operand::Memory { kind, size, address } => {
+        Operand::Memory {
+            kind,
+            size,
+            address,
+        } => {
             let addr = address.wrapping_add(indirect_offset);
             let is_float = is_float_size(*size);
             match kind {
@@ -822,10 +896,18 @@ fn resolve_comparison_lhs_static<F: FnMut(u32, MemSize) -> u32>(
                 }
                 OperandKind::Delta => {
                     let v = if cs.had_sample { cs.last_value } else { 0 };
-                    if is_float { TypedValue::Float(f32::from_bits(v)) } else { TypedValue::Unsigned(v) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(v))
+                    } else {
+                        TypedValue::Unsigned(v)
+                    }
                 }
                 OperandKind::Prior => {
-                    if is_float { TypedValue::Float(f32::from_bits(cs.prior_value)) } else { TypedValue::Unsigned(cs.prior_value) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(cs.prior_value))
+                    } else {
+                        TypedValue::Unsigned(cs.prior_value)
+                    }
                 }
                 OperandKind::Recall => remember_val,
             }
@@ -850,7 +932,11 @@ fn read_operand_rhs<F: FnMut(u32, MemSize) -> u32>(
     peek: &mut F,
 ) -> TypedValue {
     match op {
-        Operand::Memory { kind, size, address } => {
+        Operand::Memory {
+            kind,
+            size,
+            address,
+        } => {
             let addr = *address;
             let is_float = is_float_size(*size);
             match kind {
@@ -859,20 +945,36 @@ fn read_operand_rhs<F: FnMut(u32, MemSize) -> u32>(
                     wrap_value(transform_memref_value(raw, *size), *size)
                 }
                 OperandKind::Delta => {
-                    if is_float { TypedValue::Float(f32::from_bits(prev_lhs)) } else { TypedValue::Unsigned(prev_lhs) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(prev_lhs))
+                    } else {
+                        TypedValue::Unsigned(prev_lhs)
+                    }
                 }
                 OperandKind::Prior => {
-                    if is_float { TypedValue::Float(f32::from_bits(cs.prior_value)) } else { TypedValue::Unsigned(cs.prior_value) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(cs.prior_value))
+                    } else {
+                        TypedValue::Unsigned(cs.prior_value)
+                    }
                 }
                 OperandKind::Bcd => {
                     let raw = peek(addr, base_read_size(*size));
                     let val = transform_memref_value(raw, *size);
-                    if is_float { TypedValue::Float(f32::from_bits(val)) } else { TypedValue::Unsigned(bcd_decode(val)) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(val))
+                    } else {
+                        TypedValue::Unsigned(bcd_decode(val))
+                    }
                 }
                 OperandKind::Inverted => {
                     let raw = peek(addr, base_read_size(*size));
                     let val = transform_memref_value(raw, *size);
-                    if is_float { TypedValue::Float(f32::from_bits(val)) } else { TypedValue::Unsigned(!val & size_mask(*size)) }
+                    if is_float {
+                        TypedValue::Float(f32::from_bits(val))
+                    } else {
+                        TypedValue::Unsigned(!val & size_mask(*size))
+                    }
                 }
                 OperandKind::Recall => remember_val,
             }
@@ -887,7 +989,11 @@ fn read_operand_rhs<F: FnMut(u32, MemSize) -> u32>(
 /// Used for PauseIf pre-scan and static RHS without delta context.
 fn read_operand_static<F: FnMut(u32, MemSize) -> u32>(op: &Operand, peek: &mut F) -> TypedValue {
     match op {
-        Operand::Memory { kind: _, size, address } => {
+        Operand::Memory {
+            kind: _,
+            size,
+            address,
+        } => {
             let raw = peek(*address, base_read_size(*size));
             wrap_value(transform_memref_value(raw, *size), *size)
         }
@@ -1081,14 +1187,7 @@ pub(crate) fn bcd_decode(raw: u32) -> u32 {
     let d5 = ((raw >> 20) & 0xF) as u32;
     let d6 = ((raw >> 24) & 0xF) as u32;
     let d7 = ((raw >> 28) & 0xF) as u32;
-    d0
-        + d1 * 10
-        + d2 * 100
-        + d3 * 1000
-        + d4 * 10000
-        + d5 * 100000
-        + d6 * 1000000
-        + d7 * 10000000
+    d0 + d1 * 10 + d2 * 100 + d3 * 1000 + d4 * 10000 + d5 * 100000 + d6 * 1000000 + d7 * 10000000
 }
 
 // ---------------------------------------------------------------------------
@@ -1318,7 +1417,8 @@ fn decode_double32(raw: u32) -> f32 {
 
 /// Decode a Microsoft Binary Format 32-bit float (big-endian in memory).
 fn decode_mbf32(raw: u32) -> f32 {
-    let mantissa = ((raw & 0xFF000000) >> 24) | ((raw & 0x00FF0000) >> 8) | ((raw & 0x00007F00) << 8);
+    let mantissa =
+        ((raw & 0xFF000000) >> 24) | ((raw & 0x00FF0000) >> 8) | ((raw & 0x00007F00) << 8);
     let exponent = (raw & 0xFF) as i32 - 129;
     let sign = (raw & 0x00008000) != 0;
 
@@ -1616,7 +1716,10 @@ mod tests {
         // to cond[1]'s pool. After 3 frames cond[0].hit_count=3, cond[1].hit_count
         // grows; together they reach 5.
         assert!(triggered_frame.is_some(), "should have triggered");
-        assert!(triggered_frame.unwrap() <= 5, "should trigger within 5 frames");
+        assert!(
+            triggered_frame.unwrap() <= 5,
+            "should trigger within 5 frames"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1822,7 +1925,10 @@ mod tests {
         for _ in 0..20 {
             assert!(!eval_achievement(&ach, &mut state, mem.peek_fn()));
         }
-        assert!(state.waiting, "should stay in WAITING when condition is always true");
+        assert!(
+            state.waiting,
+            "should stay in WAITING when condition is always true"
+        );
     }
 
     #[test]
@@ -1848,7 +1954,10 @@ mod tests {
         // prior(0) != 5 → no trigger.
         mem.write(0x0000, 5);
         let t2 = eval_achievement(&ach, &mut state, mem.peek_fn());
-        assert!(!t2, "prior=0 (just changed from 0 to 5), should not trigger");
+        assert!(
+            !t2,
+            "prior=0 (just changed from 0 to 5), should not trigger"
+        );
 
         // Frame 3: value still 5. Prior is 0 (changed last frame 0→5).
         // prior(0) != 5 → no trigger.

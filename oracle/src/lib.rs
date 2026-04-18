@@ -127,9 +127,7 @@ impl Trigger {
         }
         let mut boxed: &mut dyn FnMut(u32, u32) -> u32 = &mut peek;
         let ud: *mut c_void = &mut boxed as *mut _ as *mut c_void;
-        unsafe {
-            ffi::rc_evaluate_trigger(self.handle, Some(thunk), ud, std::ptr::null_mut())
-        }
+        unsafe { ffi::rc_evaluate_trigger(self.handle, Some(thunk), ud, std::ptr::null_mut()) }
     }
 
     pub fn is_triggered(&mut self) -> bool {

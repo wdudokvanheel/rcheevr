@@ -13,6 +13,7 @@ use crate::http::{HttpTransport, TransportError};
 use crate::leaderboard::{eval_leaderboard, LeaderboardEvent, LeaderboardState};
 use crate::memaddr::MemSize;
 use crate::patch::{LoadError, LoadedGame};
+use serde::de::DeserializeOwned;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -57,6 +58,25 @@ struct RuntimeGame {
     last_rich_presence: String,
     ping_counter: u32,
     rom_hash: String,
+    pending_awards: Vec<PendingAward>,
+    pending_lb_submits: Vec<PendingLeaderboardSubmit>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingAward {
+    idx: usize,
+    id: u32,
+    title: String,
+    points: u32,
+    icon_url: String,
+    rom_hash: String,
+}
+
+#[derive(Debug, Clone)]
+struct PendingLeaderboardSubmit {
+    id: u32,
+    value: i64,
+    rom_hash: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +106,14 @@ impl<H: HttpTransport> AchievementRuntime<H> {
 
     /// Create a runtime pointed at a custom base URL (useful for tests).
     pub fn with_base_url(http: H, base_url: String) -> Self {
-        Self { http, base_url, session: None, game: None, events: Vec::new(), hardcore: false }
+        Self {
+            http,
+            base_url,
+            session: None,
+            game: None,
+            events: Vec::new(),
+            hardcore: false,
+        }
     }
 
     // ------------------------------------------------------------------
@@ -121,7 +148,10 @@ impl<H: HttpTransport> AchievementRuntime<H> {
     }
 
     pub fn rich_presence(&self) -> &str {
-        self.game.as_ref().map(|g| g.last_rich_presence.as_str()).unwrap_or("")
+        self.game
+            .as_ref()
+            .map(|g| g.last_rich_presence.as_str())
+            .unwrap_or("")
     }
 
     // ------------------------------------------------------------------
@@ -129,21 +159,35 @@ impl<H: HttpTransport> AchievementRuntime<H> {
     // ------------------------------------------------------------------
 
     /// Authenticate with a plain-text password.
-    pub fn login_password(&mut self, user: &str, password: &str) -> Result<&Session, RuntimeError> {
+    pub async fn login_password(
+        &mut self,
+        user: &str,
+        password: &str,
+    ) -> Result<&Session, RuntimeError> {
         let url = self.base_url.clone();
         let hardcore_str = if self.hardcore { "1" } else { "0" };
-        let form: &[(&str, &str)] = &[("r", "login2"), ("u", user), ("p", password), ("h", hardcore_str)];
-        let bytes = self.http.post_form(&url, form)?;
+        let form = [
+            ("r", "login2"),
+            ("u", user),
+            ("p", password),
+            ("h", hardcore_str),
+        ];
+        let bytes = self.http.post_form(&url, &form).await?;
         Self::handle_login_response(&bytes, &mut self.session)?;
         Ok(self.session.as_ref().unwrap())
     }
 
     /// Authenticate with a cached API token.
-    pub fn login_token(&mut self, user: &str, token: &str) -> Result<&Session, RuntimeError> {
+    pub async fn login_token(&mut self, user: &str, token: &str) -> Result<&Session, RuntimeError> {
         let url = self.base_url.clone();
         let hardcore_str = if self.hardcore { "1" } else { "0" };
-        let form: &[(&str, &str)] = &[("r", "login2"), ("u", user), ("t", token), ("h", hardcore_str)];
-        let bytes = self.http.post_form(&url, form)?;
+        let form = [
+            ("r", "login2"),
+            ("u", user),
+            ("t", token),
+            ("h", hardcore_str),
+        ];
+        let bytes = self.http.post_form(&url, &form).await?;
         Self::handle_login_response(&bytes, &mut self.session)?;
         Ok(self.session.as_ref().unwrap())
     }
@@ -174,12 +218,40 @@ impl<H: HttpTransport> AchievementRuntime<H> {
         Ok(())
     }
 
+    fn parse_response<T: DeserializeOwned>(
+        bytes: &[u8],
+        endpoint: &'static str,
+    ) -> Result<T, RuntimeError> {
+        let resp: RaResponse<T> = serde_json::from_slice(bytes)
+            .map_err(|e| RuntimeError::InvalidResponse(e.to_string()))?;
+
+        if !resp.success {
+            let msg = resp.error.unwrap_or_else(|| format!("{endpoint} failed"));
+            return Err(RuntimeError::Api(msg));
+        }
+
+        resp.data
+            .ok_or_else(|| RuntimeError::InvalidResponse(format!("missing {endpoint} data")))
+    }
+
+    fn parse_empty_response(bytes: &[u8], endpoint: &'static str) -> Result<(), RuntimeError> {
+        let resp: RaResponse<serde_json::Value> = serde_json::from_slice(bytes)
+            .map_err(|e| RuntimeError::InvalidResponse(e.to_string()))?;
+        if resp.success {
+            Ok(())
+        } else {
+            Err(RuntimeError::Api(
+                resp.error.unwrap_or_else(|| format!("{endpoint} failed")),
+            ))
+        }
+    }
+
     // ------------------------------------------------------------------
     // load_rom
     // ------------------------------------------------------------------
 
     /// Hash `rom`, look up its game ID, fetch the patch, and start a session.
-    pub fn load_rom(&mut self, rom: &[u8]) -> Result<&LoadedGame, RuntimeError> {
+    pub async fn load_rom(&mut self, rom: &[u8]) -> Result<&LoadedGame, RuntimeError> {
         let session = self.session.as_ref().ok_or(RuntimeError::NotLoggedIn)?;
         let user = session.user.clone();
         let token = session.token.clone();
@@ -188,15 +260,10 @@ impl<H: HttpTransport> AchievementRuntime<H> {
         let url = self.base_url.clone();
 
         // Step 1: resolve game ID from ROM hash.
-        let gameid_bytes = self.http.post_form(&url, &[("r", "gameid"), ("m", &rom_hash)])?;
-        let gameid_resp: RaResponse<api::gameid::GameIdData> =
-            serde_json::from_slice(&gameid_bytes)
-                .map_err(|e| RuntimeError::InvalidResponse(e.to_string()))?;
-
-        let game_id = gameid_resp
-            .data
-            .ok_or_else(|| RuntimeError::InvalidResponse("missing gameid data".to_string()))?
-            .game_id;
+        let gameid_form = [("r", "gameid"), ("m", rom_hash.as_str())];
+        let gameid_bytes = self.http.post_form(&url, &gameid_form).await?;
+        let game_id =
+            Self::parse_response::<api::gameid::GameIdData>(&gameid_bytes, "gameid")?.game_id;
 
         if game_id == 0 {
             return Err(RuntimeError::Api("unknown rom".to_string()));
@@ -205,51 +272,43 @@ impl<H: HttpTransport> AchievementRuntime<H> {
         let game_id_str = game_id.to_string();
 
         // Step 2: fetch patch.
-        let patch_bytes = self.http.post_form(
-            &url,
-            &[("r", "patch"), ("u", &user), ("t", &token), ("g", &game_id_str)],
-        )?;
+        let patch_form = [
+            ("r", "patch"),
+            ("u", user.as_str()),
+            ("t", token.as_str()),
+            ("g", game_id_str.as_str()),
+        ];
+        let patch_bytes = self.http.post_form(&url, &patch_form).await?;
 
-        let patch_json =
-            std::str::from_utf8(&patch_bytes).map_err(|e| RuntimeError::InvalidResponse(e.to_string()))?;
+        let patch_json = std::str::from_utf8(&patch_bytes)
+            .map_err(|e| RuntimeError::InvalidResponse(e.to_string()))?;
 
         let mut loaded = LoadedGame::from_patch_json(patch_json).map_err(RuntimeError::Load)?;
         loaded.game_id = game_id as u32;
 
         // Step 3: start session.
         let hardcore_val = if self.hardcore { "1" } else { "0" };
-        let session_bytes = self.http.post_form(
-            &url,
-            &[
-                ("r", "startsession"),
-                ("u", &user),
-                ("t", &token),
-                ("g", &game_id_str),
-                ("h", hardcore_val),
-            ],
-        )?;
+        let session_form = [
+            ("r", "startsession"),
+            ("u", user.as_str()),
+            ("t", token.as_str()),
+            ("g", game_id_str.as_str()),
+            ("h", hardcore_val),
+        ];
+        let session_bytes = self.http.post_form(&url, &session_form).await?;
 
         // Parse already-unlocked IDs to avoid re-awarding them.
-        let already_unlocked: std::collections::HashSet<u32> = {
-            if let Ok(resp) =
-                serde_json::from_slice::<RaResponse<api::startsession::StartSessionData>>(
-                    &session_bytes,
-                )
-            {
-                if let Some(data) = resp.data {
-                    let unlocks = if self.hardcore {
-                        data.hardcore_unlocks
-                    } else {
-                        data.unlocks
-                    };
-                    unlocks.iter().map(|e| e.id as u32).collect()
-                } else {
-                    std::collections::HashSet::new()
-                }
-            } else {
-                std::collections::HashSet::new()
-            }
+        let session_data = Self::parse_response::<api::startsession::StartSessionData>(
+            &session_bytes,
+            "startsession",
+        )?;
+        let unlocks = if self.hardcore {
+            session_data.hardcore_unlocks
+        } else {
+            session_data.unlocks
         };
+        let already_unlocked: std::collections::HashSet<u32> =
+            unlocks.iter().map(|e| e.id as u32).collect();
 
         // Step 4: build per-achievement state.
         let achievement_states: Vec<AchievementState> = loaded
@@ -258,11 +317,17 @@ impl<H: HttpTransport> AchievementRuntime<H> {
             .map(|a| AchievementState::for_achievement(&a.ast))
             .collect();
 
-        let unlocked: Vec<bool> =
-            loaded.achievements.iter().map(|a| already_unlocked.contains(&a.id)).collect();
+        let unlocked: Vec<bool> = loaded
+            .achievements
+            .iter()
+            .map(|a| already_unlocked.contains(&a.id))
+            .collect();
 
-        let leaderboard_states: Vec<LeaderboardState> =
-            loaded.leaderboards.iter().map(|lb| LeaderboardState::for_leaderboard(&lb.ast)).collect();
+        let leaderboard_states: Vec<LeaderboardState> = loaded
+            .leaderboards
+            .iter()
+            .map(|lb| LeaderboardState::for_leaderboard(&lb.ast))
+            .collect();
 
         self.game = Some(RuntimeGame {
             loaded,
@@ -272,6 +337,8 @@ impl<H: HttpTransport> AchievementRuntime<H> {
             last_rich_presence: String::new(),
             ping_counter: 0,
             rom_hash,
+            pending_awards: Vec::new(),
+            pending_lb_submits: Vec::new(),
         });
 
         Ok(&self.game.as_ref().unwrap().loaded)
@@ -285,7 +352,7 @@ impl<H: HttpTransport> AchievementRuntime<H> {
     ///
     /// `peek` must be a side-effect-free closure that reads memory from the
     /// emulator core: `peek(address, size) -> value`.
-    pub fn peek_from<F: FnMut(u32, MemSize) -> u32>(&mut self, mut peek: F) {
+    pub async fn peek_from<F: FnMut(u32, MemSize) -> u32>(&mut self, mut peek: F) {
         if self.game.is_none() {
             return;
         }
@@ -302,16 +369,7 @@ impl<H: HttpTransport> AchievementRuntime<H> {
         // Evaluate achievements.
         // Collect triggered info first, then do HTTP (avoids split-borrow issues).
         // ------------------------------------------------------------------
-        struct AwardInfo {
-            idx: usize,
-            id: u32,
-            title: String,
-            points: u32,
-            icon_url: String,
-            rom_hash: String,
-        }
-
-        let mut awards: Vec<AwardInfo> = Vec::new();
+        let mut awards: Vec<PendingAward> = Vec::new();
         {
             let game = self.game.as_mut().unwrap();
             for idx in 0..game.loaded.achievements.len() {
@@ -325,7 +383,7 @@ impl<H: HttpTransport> AchievementRuntime<H> {
                 );
                 if triggered {
                     let ach = &game.loaded.achievements[idx];
-                    awards.push(AwardInfo {
+                    awards.push(PendingAward {
                         idx,
                         id: ach.id,
                         title: ach.title.clone(),
@@ -338,48 +396,66 @@ impl<H: HttpTransport> AchievementRuntime<H> {
                     });
                 }
             }
+            game.pending_awards.extend(awards);
         }
 
-        for info in awards {
-            // Mark unlocked before any borrow.
-            self.game.as_mut().unwrap().unlocked[info.idx] = true;
-
+        let pending_awards = {
+            let game = self.game.as_mut().unwrap();
+            std::mem::take(&mut game.pending_awards)
+        };
+        let mut retry_awards = Vec::new();
+        for info in pending_awards {
             let id_str = info.id.to_string();
-            let award_result = self.http.post_form(
-                &url,
-                &[
-                    ("r", "awardachievement"),
-                    ("u", &user),
-                    ("t", &token),
-                    ("a", &id_str),
-                    ("h", hardcore_val),
-                    ("m", &info.rom_hash),
-                ],
-            );
-            if let Err(e) = award_result {
-                self.events.push(AchievementEvent::ServerError(format!(
-                    "awardachievement id={}: {:?}",
-                    info.id, e
-                )));
+            let award_form = [
+                ("r", "awardachievement"),
+                ("u", user.as_str()),
+                ("t", token.as_str()),
+                ("a", id_str.as_str()),
+                ("h", hardcore_val),
+                ("m", info.rom_hash.as_str()),
+            ];
+            let award_result = async {
+                let bytes = self.http.post_form(&url, &award_form).await?;
+                Self::parse_response::<api::awardachievement::AwardAchievementData>(
+                    &bytes,
+                    "awardachievement",
+                )
             }
-            self.events.push(AchievementEvent::Unlocked {
-                id: info.id,
-                title: info.title,
-                points: info.points,
-                icon_url: info.icon_url,
-            });
+            .await;
+
+            match award_result {
+                Ok(_) => {
+                    self.game.as_mut().unwrap().unlocked[info.idx] = true;
+                    self.events.push(AchievementEvent::Unlocked {
+                        id: info.id,
+                        title: info.title,
+                        points: info.points,
+                        icon_url: info.icon_url,
+                    });
+                }
+                Err(e) => {
+                    self.events.push(AchievementEvent::ServerError(format!(
+                        "awardachievement id={}: {:?}",
+                        info.id, e
+                    )));
+                    retry_awards.push(info);
+                }
+            }
+        }
+        if !retry_awards.is_empty() {
+            self.game
+                .as_mut()
+                .unwrap()
+                .pending_awards
+                .extend(retry_awards);
         }
 
         // ------------------------------------------------------------------
         // Evaluate leaderboards.
         // Collect events first, then do HTTP.
         // ------------------------------------------------------------------
-        struct LbEventInfo {
-            event: LeaderboardEvent,
-            rom_hash: String,
-        }
-
-        let mut lb_events: Vec<LbEventInfo> = Vec::new();
+        let mut lb_events: Vec<LeaderboardEvent> = Vec::new();
+        let mut lb_submits: Vec<PendingLeaderboardSubmit> = Vec::new();
         {
             let game = self.game.as_mut().unwrap();
             let rom_hash = game.rom_hash.clone();
@@ -390,49 +466,89 @@ impl<H: HttpTransport> AchievementRuntime<H> {
                     &mut peek,
                 );
                 if let Some(ev) = event {
-                    lb_events.push(LbEventInfo { event: ev, rom_hash: rom_hash.clone() });
+                    if let LeaderboardEvent::Submitted { id, value } = ev {
+                        lb_submits.push(PendingLeaderboardSubmit {
+                            id,
+                            value,
+                            rom_hash: rom_hash.clone(),
+                        });
+                    } else {
+                        lb_events.push(ev);
+                    }
                 }
             }
+            game.pending_lb_submits.extend(lb_submits);
         }
 
-        for info in lb_events {
-            match info.event {
+        for event in lb_events {
+            match event {
                 LeaderboardEvent::Started(id) => {
                     self.events.push(AchievementEvent::LeaderboardStarted(id));
                 }
                 LeaderboardEvent::Cancelled(id) => {
                     self.events.push(AchievementEvent::LeaderboardCancelled(id));
                 }
-                LeaderboardEvent::Submitted { id, value } => {
-                    let id_str = id.to_string();
-                    let value_str = value.to_string();
-                    let submit_result = self.http.post_form(
-                        &url,
-                        &[
-                            ("r", "submitlbentry"),
-                            ("u", &user),
-                            ("t", &token),
-                            ("i", &id_str),
-                            ("s", &value_str),
-                            ("m", &info.rom_hash),
-                        ],
-                    );
-                    if let Err(e) = submit_result {
-                        self.events.push(AchievementEvent::ServerError(format!(
-                            "submitlbentry id={}: {:?}",
-                            id, e
-                        )));
-                    }
-                    self.events.push(AchievementEvent::LeaderboardSubmitted { id, score: value });
+                LeaderboardEvent::Submitted { .. } => unreachable!("submits are queued"),
+            }
+        }
+
+        let pending_lb_submits = {
+            let game = self.game.as_mut().unwrap();
+            std::mem::take(&mut game.pending_lb_submits)
+        };
+        let mut retry_lb_submits = Vec::new();
+        for info in pending_lb_submits {
+            let id_str = info.id.to_string();
+            let value_str = info.value.to_string();
+            let submit_form = [
+                ("r", "submitlbentry"),
+                ("u", user.as_str()),
+                ("t", token.as_str()),
+                ("i", id_str.as_str()),
+                ("s", value_str.as_str()),
+                ("m", info.rom_hash.as_str()),
+            ];
+            let submit_result = async {
+                let bytes = self.http.post_form(&url, &submit_form).await?;
+                Self::parse_response::<api::submitlbentry::SubmitLbEntryData>(
+                    &bytes,
+                    "submitlbentry",
+                )
+            }
+            .await;
+
+            match submit_result {
+                Ok(_) => {
+                    self.events.push(AchievementEvent::LeaderboardSubmitted {
+                        id: info.id,
+                        score: info.value,
+                    });
+                }
+                Err(e) => {
+                    self.events.push(AchievementEvent::ServerError(format!(
+                        "submitlbentry id={}: {:?}",
+                        info.id, e
+                    )));
+                    retry_lb_submits.push(info);
                 }
             }
+        }
+        if !retry_lb_submits.is_empty() {
+            self.game
+                .as_mut()
+                .unwrap()
+                .pending_lb_submits
+                .extend(retry_lb_submits);
         }
 
         // ------------------------------------------------------------------
         // Update rich presence.
         // ------------------------------------------------------------------
         let game = self.game.as_mut().unwrap();
-        let rp = game.loaded.rich_presence.render(|addr| peek(addr, MemSize::Byte));
+        let rp = game
+            .loaded
+            .rich_presence
+            .render(|addr| peek(addr, MemSize::Byte));
         game.last_rich_presence = rp;
 
         // ------------------------------------------------------------------
@@ -443,16 +559,24 @@ impl<H: HttpTransport> AchievementRuntime<H> {
             game.ping_counter = 0;
             let game_id_str = game.loaded.game_id.to_string();
             let rp_str = game.last_rich_presence.clone();
-            let _ = self.http.post_form(
-                &url,
-                &[
-                    ("r", "ping"),
-                    ("u", &user),
-                    ("t", &token),
-                    ("g", &game_id_str),
-                    ("m", &rp_str),
-                ],
-            );
+            let ping_form = [
+                ("r", "ping"),
+                ("u", user.as_str()),
+                ("t", token.as_str()),
+                ("g", game_id_str.as_str()),
+                ("m", rp_str.as_str()),
+            ];
+            match self.http.post_form(&url, &ping_form).await {
+                Ok(bytes) => {
+                    if let Err(e) = Self::parse_empty_response(&bytes, "ping") {
+                        self.events
+                            .push(AchievementEvent::ServerError(format!("ping: {:?}", e)));
+                    }
+                }
+                Err(e) => self
+                    .events
+                    .push(AchievementEvent::ServerError(format!("ping: {:?}", e))),
+            }
         }
     }
 
@@ -581,8 +705,8 @@ mod tests {
     // Test 1: new() with MockTransport compiles and creates a runtime.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn new_with_mock_transport() {
+    #[tokio::test]
+    async fn new_with_mock_transport() {
         let t = MockTransport::new();
         let rt = AchievementRuntime::new(t);
         assert!(rt.session().is_none());
@@ -593,13 +717,17 @@ mod tests {
     // Test 2: login_password success → session populated, returns Session.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn login_password_success() {
+    #[tokio::test]
+    async fn login_password_success() {
         let mut t = MockTransport::new();
-        t.expect_json("", &[("r", "login2"), ("u", "testuser"), ("p", "pass")], login_ok_resp());
+        t.expect_json(
+            "",
+            &[("r", "login2"), ("u", "testuser"), ("p", "pass")],
+            login_ok_resp(),
+        );
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        let sess = rt.login_password("testuser", "pass").unwrap();
+        let sess = rt.login_password("testuser", "pass").await.unwrap();
 
         assert_eq!(sess.user, "Test User");
         assert_eq!(sess.token, "mytoken");
@@ -612,8 +740,8 @@ mod tests {
     // Test 3: login_password failure → RuntimeError::Api.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn login_password_failure_returns_api_error() {
+    #[tokio::test]
+    async fn login_password_failure_returns_api_error() {
         let mut t = MockTransport::new();
         t.expect_json(
             "",
@@ -622,7 +750,7 @@ mod tests {
         );
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        let err = rt.login_password("bad", "bad").unwrap_err();
+        let err = rt.login_password("bad", "bad").await.unwrap_err();
         assert!(matches!(err, RuntimeError::Api(msg) if msg.contains("Invalid credentials")));
         assert!(rt.session().is_none());
     }
@@ -631,13 +759,17 @@ mod tests {
     // Test 4: login_token happy path.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn login_token_happy_path() {
+    #[tokio::test]
+    async fn login_token_happy_path() {
         let mut t = MockTransport::new();
-        t.expect_json("", &[("r", "login2"), ("u", "testuser"), ("t", "mytoken")], login_ok_resp());
+        t.expect_json(
+            "",
+            &[("r", "login2"), ("u", "testuser"), ("t", "mytoken")],
+            login_ok_resp(),
+        );
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        let sess = rt.login_token("testuser", "mytoken").unwrap();
+        let sess = rt.login_token("testuser", "mytoken").await.unwrap();
         assert_eq!(sess.token, "mytoken");
     }
 
@@ -645,15 +777,15 @@ mod tests {
     // Test 5: load_rom happy path → game populated.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn load_rom_happy_path() {
+    #[tokio::test]
+    async fn load_rom_happy_path() {
         let mut t = MockTransport::new();
         t.expect_json("", &[("r", "login2")], login_ok_resp());
         queue_load_rom(&mut t, 42, patch_json_one_ach());
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        rt.login_password("testuser", "pass").unwrap();
-        let game = rt.load_rom(b"fake_rom_bytes").unwrap();
+        rt.login_password("testuser", "pass").await.unwrap();
+        let game = rt.load_rom(b"fake_rom_bytes").await.unwrap();
 
         assert_eq!(game.title, "Test Game");
         assert_eq!(game.game_id, 42);
@@ -665,15 +797,15 @@ mod tests {
     // Test 6: load_rom unknown game (gameid returns 0) → RuntimeError::Api.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn load_rom_unknown_game() {
+    #[tokio::test]
+    async fn load_rom_unknown_game() {
         let mut t = MockTransport::new();
         t.expect_json("", &[("r", "login2")], login_ok_resp());
         t.expect_json("", &[("r", "gameid")], gameid_resp(0));
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        rt.login_password("testuser", "pass").unwrap();
-        let err = rt.load_rom(b"unknown_rom").unwrap_err();
+        rt.login_password("testuser", "pass").await.unwrap();
+        let err = rt.load_rom(b"unknown_rom").await.unwrap_err();
         assert!(matches!(err, RuntimeError::Api(msg) if msg.contains("unknown rom")));
     }
 
@@ -682,8 +814,8 @@ mod tests {
     //         event and records an awardachievement call.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn peek_from_triggers_unlocked_event_and_award_call() {
+    #[tokio::test]
+    async fn peek_from_triggers_unlocked_event_and_award_call() {
         let mut t = MockTransport::new();
         t.expect_json("", &[("r", "login2")], login_ok_resp());
         queue_load_rom(&mut t, 42, patch_json_one_ach());
@@ -691,33 +823,37 @@ mod tests {
         t.expect_json("", &[("r", "awardachievement"), ("a", "1")], award_resp());
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        rt.login_password("testuser", "pass").unwrap();
-        rt.load_rom(b"rom").unwrap();
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
 
         // Frame 1: all zeros — exits WAITING state (condition not met).
-        rt.peek_from(|_, _| 0);
+        rt.peek_from(|_, _| 0).await;
         assert!(rt.drain_events().next().is_none());
 
         // Frame 2: mem[0xc0] = 1 → achievement triggers.
-        rt.peek_from(|addr, _size| if addr == 0xc0 { 1 } else { 0 });
+        rt.peek_from(|addr, _size| if addr == 0xc0 { 1 } else { 0 })
+            .await;
 
         let events: Vec<_> = rt.drain_events().collect();
         assert!(
-            events.iter().any(|e| matches!(e, AchievementEvent::Unlocked { id: 1, .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AchievementEvent::Unlocked { id: 1, .. })),
             "expected Unlocked event, got {:?} events",
             events.len()
         );
 
         // Verify transport recorded an awardachievement call.
-        rt.http.assert_called("", &[("r", "awardachievement"), ("a", "1")]);
+        rt.http
+            .assert_called("", &[("r", "awardachievement"), ("a", "1")]);
     }
 
     // -----------------------------------------------------------------------
     // Test 8: peek_from does not re-award already-unlocked achievements.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn peek_from_no_reawrd_on_second_frame() {
+    #[tokio::test]
+    async fn peek_from_no_reawrd_on_second_frame() {
         let mut t = MockTransport::new();
         t.expect_json("", &[("r", "login2")], login_ok_resp());
         queue_load_rom(&mut t, 42, patch_json_one_ach());
@@ -725,23 +861,27 @@ mod tests {
         t.expect_json("", &[("r", "awardachievement")], award_resp());
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        rt.login_password("testuser", "pass").unwrap();
-        rt.load_rom(b"rom").unwrap();
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
 
         // Frame 1: all zeros — exits WAITING state.
-        rt.peek_from(|_, _| 0);
+        rt.peek_from(|_, _| 0).await;
         let _ = rt.drain_events().count();
 
         // Frame 2: triggers.
-        rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 });
+        rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 })
+            .await;
         let _ = rt.drain_events().count();
 
         // Frame 3: same memory state — must NOT award again.
         rt.http.strict = false; // allow extra unmatched calls without panicking
-        rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 });
+        rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 })
+            .await;
         let events: Vec<_> = rt.drain_events().collect();
         assert!(
-            !events.iter().any(|e| matches!(e, AchievementEvent::Unlocked { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, AchievementEvent::Unlocked { .. })),
             "should not re-emit Unlocked on second frame"
         );
 
@@ -750,7 +890,11 @@ mod tests {
             .http
             .calls
             .iter()
-            .filter(|c| c.form.iter().any(|(k, v)| k == "r" && v == "awardachievement"))
+            .filter(|c| {
+                c.form
+                    .iter()
+                    .any(|(k, v)| k == "r" && v == "awardachievement")
+            })
             .count();
         assert_eq!(award_calls, 1, "expected exactly 1 awardachievement call");
     }
@@ -759,8 +903,8 @@ mod tests {
     // Test 9: leaderboard started then submitted across two frames.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn leaderboard_started_then_submitted() {
+    #[tokio::test]
+    async fn leaderboard_started_then_submitted() {
         let mut t = MockTransport::new();
         t.expect_json("", &[("r", "login2")], login_ok_resp());
         queue_load_rom(&mut t, 42, patch_json_ach_and_lb());
@@ -768,47 +912,54 @@ mod tests {
         t.strict = false;
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        rt.login_password("testuser", "pass").unwrap();
-        rt.load_rom(b"rom").unwrap();
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
 
         // Frame 1: mem[0xd0]=1 → STA fires. Achievement at 0xc0 not satisfied.
         rt.peek_from(|addr, _| match addr {
             0xd0 => 1,
             _ => 0,
-        });
+        })
+        .await;
         let events1: Vec<_> = rt.drain_events().collect();
         assert!(
-            events1.iter().any(|e| matches!(e, AchievementEvent::LeaderboardStarted(7))),
+            events1
+                .iter()
+                .any(|e| matches!(e, AchievementEvent::LeaderboardStarted(7))),
             "expected LeaderboardStarted(7)"
         );
 
         // Frame 2: mem[0xd0]=2 → SUB fires (submit), mem[0xe0]=42 (value).
         // Need to queue the submitlbentry response.
         rt.http.strict = false;
-        rt.http.expect_json("", &[("r", "submitlbentry"), ("i", "7")], submit_lb_resp());
+        rt.http
+            .expect_json("", &[("r", "submitlbentry"), ("i", "7")], submit_lb_resp());
 
         rt.peek_from(|addr, _| match addr {
             0xd0 => 2,
             0xe0 => 42,
             _ => 0,
-        });
+        })
+        .await;
         let events2: Vec<_> = rt.drain_events().collect();
         assert!(
-            events2
-                .iter()
-                .any(|e| matches!(e, AchievementEvent::LeaderboardSubmitted { id: 7, score: 42 })),
+            events2.iter().any(|e| matches!(
+                e,
+                AchievementEvent::LeaderboardSubmitted { id: 7, score: 42 }
+            )),
             "expected LeaderboardSubmitted(7, 42)"
         );
 
-        rt.http.assert_called("", &[("r", "submitlbentry"), ("i", "7"), ("s", "42")]);
+        rt.http
+            .assert_called("", &[("r", "submitlbentry"), ("i", "7"), ("s", "42")]);
     }
 
     // -----------------------------------------------------------------------
     // Test 10: set_hardcore(true) causes h=1 on subsequent award calls.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn set_hardcore_sets_h1_on_award() {
+    #[tokio::test]
+    async fn set_hardcore_sets_h1_on_award() {
         let mut t = MockTransport::new();
         t.expect_json("", &[("r", "login2")], login_ok_resp());
         queue_load_rom(&mut t, 42, patch_json_one_ach());
@@ -816,48 +967,56 @@ mod tests {
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
         rt.set_hardcore(true);
-        rt.login_password("testuser", "pass").unwrap();
-        rt.load_rom(b"rom").unwrap();
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
 
         // Frame 1: all zeros — exits WAITING state.
-        rt.peek_from(|_, _| 0);
+        rt.peek_from(|_, _| 0).await;
         // Frame 2: triggers.
-        rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 });
+        rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 })
+            .await;
 
-        rt.http.assert_called("", &[("r", "awardachievement"), ("h", "1")]);
+        rt.http
+            .assert_called("", &[("r", "awardachievement"), ("h", "1")]);
     }
 
     // -----------------------------------------------------------------------
     // Test 10b: flipping hardcore mid-session drops session and game.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn set_hardcore_mid_session_drops_state() {
+    #[tokio::test]
+    async fn set_hardcore_mid_session_drops_state() {
         let mut t = MockTransport::new();
         t.expect_json("", &[("r", "login2")], login_ok_resp());
         queue_load_rom(&mut t, 42, patch_json_one_ach());
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        rt.login_password("testuser", "pass").unwrap();
-        rt.load_rom(b"rom").unwrap();
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
         assert!(rt.session().is_some());
         assert!(rt.loaded_game().is_some());
 
         rt.set_hardcore(true);
-        assert!(rt.session().is_none(), "session should be dropped on hardcore flip");
-        assert!(rt.loaded_game().is_none(), "loaded game should be dropped on hardcore flip");
+        assert!(
+            rt.session().is_none(),
+            "session should be dropped on hardcore flip"
+        );
+        assert!(
+            rt.loaded_game().is_none(),
+            "loaded game should be dropped on hardcore flip"
+        );
         assert!(rt.hardcore());
     }
 
-    #[test]
-    fn set_hardcore_no_change_preserves_state() {
+    #[tokio::test]
+    async fn set_hardcore_no_change_preserves_state() {
         let mut t = MockTransport::new();
         t.expect_json("", &[("r", "login2")], login_ok_resp());
         queue_load_rom(&mut t, 42, patch_json_one_ach());
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        rt.login_password("testuser", "pass").unwrap();
-        rt.load_rom(b"rom").unwrap();
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
 
         // Setting the same value is a no-op — don't drop state.
         rt.set_hardcore(false);
@@ -869,11 +1028,11 @@ mod tests {
     // Test 11: load_rom fails when not logged in.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn load_rom_requires_login() {
+    #[tokio::test]
+    async fn load_rom_requires_login() {
         let t = MockTransport::new();
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        let err = rt.load_rom(b"rom").unwrap_err();
+        let err = rt.load_rom(b"rom").await.unwrap_err();
         assert!(matches!(err, RuntimeError::NotLoggedIn));
     }
 
@@ -881,23 +1040,24 @@ mod tests {
     // Test 12: drain_events clears the queue.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn drain_events_clears_queue() {
+    #[tokio::test]
+    async fn drain_events_clears_queue() {
         let mut t = MockTransport::new();
         t.expect_json("", &[("r", "login2")], login_ok_resp());
         queue_load_rom(&mut t, 42, patch_json_one_ach());
         t.expect_json("", &[("r", "awardachievement")], award_resp());
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        rt.login_password("testuser", "pass").unwrap();
-        rt.load_rom(b"rom").unwrap();
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
 
         // Frame 1: all zeros — exits WAITING state.
-        rt.peek_from(|_, _| 0);
+        rt.peek_from(|_, _| 0).await;
         let _ = rt.drain_events().count();
 
         // Frame 2: triggers.
-        rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 });
+        rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 })
+            .await;
         let count1 = rt.drain_events().count();
         assert!(count1 > 0);
 
@@ -910,13 +1070,13 @@ mod tests {
     // Test 13: loaded_game() returns None before load_rom.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn loaded_game_none_before_load() {
+    #[tokio::test]
+    async fn loaded_game_none_before_load() {
         let mut t = MockTransport::new();
         t.expect_json("", &[("r", "login2")], login_ok_resp());
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        rt.login_password("testuser", "pass").unwrap();
+        rt.login_password("testuser", "pass").await.unwrap();
         assert!(rt.loaded_game().is_none());
     }
 
@@ -924,8 +1084,8 @@ mod tests {
     // Test 14: rich_presence returns empty string before load_rom.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn rich_presence_empty_before_load() {
+    #[tokio::test]
+    async fn rich_presence_empty_before_load() {
         let t = MockTransport::new();
         let rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
         assert_eq!(rt.rich_presence(), "");
@@ -935,18 +1095,18 @@ mod tests {
     // Test 15: rich_presence is updated after peek_from.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn rich_presence_updated_after_peek() {
+    #[tokio::test]
+    async fn rich_presence_updated_after_peek() {
         let mut t = MockTransport::new();
         t.expect_json("", &[("r", "login2")], login_ok_resp());
         queue_load_rom(&mut t, 42, patch_json_one_ach());
         t.strict = false; // don't require awardachievement or ping expectations
 
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
-        rt.login_password("testuser", "pass").unwrap();
-        rt.load_rom(b"rom").unwrap();
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
 
-        rt.peek_from(|_addr, _| 0);
+        rt.peek_from(|_addr, _| 0).await;
 
         // "Display:\nPlaying" → should render "Playing".
         assert_eq!(rt.rich_presence(), "Playing");

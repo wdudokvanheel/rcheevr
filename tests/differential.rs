@@ -8,7 +8,7 @@
 #![cfg(feature = "oracle")]
 
 use rveevr::condition::Achievement;
-use rveevr::evaluator::{eval_achievement, AchievementState, CondsetState, ConditionState};
+use rveevr::evaluator::{eval_achievement, AchievementState, ConditionState, CondsetState};
 use rveevr::leaderboard::eval_value;
 use rveevr::memaddr::MemSize;
 use rveevr_oracle::{ffi, Trigger, Value};
@@ -77,7 +77,12 @@ fn size_to_bytes(size: MemSize) -> u32 {
 /// `(our_triggered_frames, oracle_triggered_frames)` for the caller to
 /// compare. Each frame is a closure that mutates the shared memory before
 /// both evaluators sample it.
-fn run_trace<F>(memaddr: &str, mem_size: usize, frames: usize, mut step: F) -> (Vec<bool>, Vec<bool>)
+fn run_trace<F>(
+    memaddr: &str,
+    mem_size: usize,
+    frames: usize,
+    mut step: F,
+) -> (Vec<bool>, Vec<bool>)
 where
     F: FnMut(usize, &mut Mem),
 {
@@ -176,15 +181,10 @@ fn word_comparison() {
 fn multi_condset_alt() {
     // Core must pass AND at least one alt. Here alt1 passes on frame 2,
     // alt2 never; so trigger on frame 2 when both core + alt1 hold.
-    let (ours, theirs) = run_trace(
-        "0xH0000=1S0xH0001=2S0xH0002=3",
-        16,
-        4,
-        |frame, mem| {
-            mem.write(0, 1);
-            mem.write(1, if frame >= 2 { 2 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=1S0xH0001=2S0xH0002=3", 16, 4, |frame, mem| {
+        mem.write(0, 1);
+        mem.write(1, if frame >= 2 { 2 } else { 0 });
+    });
     assert_logs_agree("multi_condset_alt", &ours, &theirs);
 }
 
@@ -291,15 +291,20 @@ fn rcheevos_delta_transition_detect() {
 fn rcheevos_resetif_with_hit_count() {
     // 0xH0001=18(2)_0xH0002=52_R:0xL0004=4
     // Need 2 frames of mem[1]=18, plus mem[2]=52, reset when nibble(mem[4])=4.
-    let (ours, theirs) = run_trace("0xH0001=18(2)_0xH0002=52_R:0xL0004=4", 256, 10, |frame, mem| {
-        mem.write(1, 18);
-        mem.write(2, 52);
-        if frame == 3 {
-            mem.write(4, 0x04); // low nibble = 4 → reset
-        } else {
-            mem.write(4, 0x00);
-        }
-    });
+    let (ours, theirs) = run_trace(
+        "0xH0001=18(2)_0xH0002=52_R:0xL0004=4",
+        256,
+        10,
+        |frame, mem| {
+            mem.write(1, 18);
+            mem.write(2, 52);
+            if frame == 3 {
+                mem.write(4, 0x04); // low nibble = 4 → reset
+            } else {
+                mem.write(4, 0x00);
+            }
+        },
+    );
     assert_logs_agree("rcheevos_resetif_with_hit_count", &ours, &theirs);
 }
 
@@ -322,13 +327,18 @@ fn rcheevos_alts_with_constant_and_resetif() {
 fn rcheevos_resetif_and_trigger_flag() {
     // R:0xH0003=1_0xH0004=1.1._T:0xH0000=1
     // ResetIf when mem[3]=1. Standard with legacy hit count 1. Trigger flag on mem[0]=1.
-    let (ours, theirs) = run_trace("R:0xH0003=1_0xH0004=1.1._T:0xH0000=1", 256, 8, |frame, mem| {
-        mem.write(4, 1); // standard condition always true, hit count 1 = needs 1 frame
-        if frame >= 3 {
-            mem.write(0, 1); // Trigger flag fires
-        }
-        // mem[3] stays 0 so ResetIf doesn't fire
-    });
+    let (ours, theirs) = run_trace(
+        "R:0xH0003=1_0xH0004=1.1._T:0xH0000=1",
+        256,
+        8,
+        |frame, mem| {
+            mem.write(4, 1); // standard condition always true, hit count 1 = needs 1 frame
+            if frame >= 3 {
+                mem.write(0, 1); // Trigger flag fires
+            }
+            // mem[3] stays 0 so ResetIf doesn't fire
+        },
+    );
     assert_logs_agree("rcheevos_resetif_and_trigger_flag", &ours, &theirs);
 }
 
@@ -369,7 +379,7 @@ fn pauseif_blocks_accumulation() {
     // Pause on frames 2-3 should delay the hit-count completion.
     let (ours, theirs) = run_trace("0xH0000=5(3)_P:0xH0001=1", 16, 8, |frame, mem| {
         mem.write(0, 5); // always true for hit counting
-        // pause on frames 2 and 3
+                         // pause on frames 2 and 3
         mem.write(1, if frame == 2 || frame == 3 { 1 } else { 0 });
     });
     assert_logs_agree("pauseif_blocks_accumulation", &ours, &theirs);
@@ -426,12 +436,17 @@ fn sub_hits_reduces_pool() {
     // C:0xH0000=5 adds hits, D:0xH0001=1 subtracts hits.
     // Terminal condition 0xH0002=0(3) needs net 3 hits.
     // If sub_hits fires some frames, it delays trigger.
-    let (ours, theirs) = run_trace("C:0xH0000=5_D:0xH0001=1_0xH0002=0(3)", 16, 10, |frame, mem| {
-        mem.write(0, 5); // add hits every frame
-        mem.write(2, 0); // terminal always true
-        // subtract on frames 1 and 3
-        mem.write(1, if frame == 1 || frame == 3 { 1 } else { 0 });
-    });
+    let (ours, theirs) = run_trace(
+        "C:0xH0000=5_D:0xH0001=1_0xH0002=0(3)",
+        16,
+        10,
+        |frame, mem| {
+            mem.write(0, 5); // add hits every frame
+            mem.write(2, 0); // terminal always true
+                             // subtract on frames 1 and 3
+            mem.write(1, if frame == 1 || frame == 3 { 1 } else { 0 });
+        },
+    );
     assert_logs_agree("sub_hits_reduces_pool", &ours, &theirs);
 }
 
@@ -550,7 +565,8 @@ fn add_source_sub_source_combo() {
 fn reset_next_if_passes_through_add_source() {
     let (ours, theirs) = run_trace(
         "Z:0xH0002=1_A:0xH0003_0xH0000=5(3)",
-        16, 10,
+        16,
+        10,
         |frame, mem| {
             mem.write(0, 5); // standard condition always true (after add_source)
             mem.write(3, 0); // add_source contributes 0
@@ -595,15 +611,11 @@ fn add_source_multiply() {
 /// frames of mem[1]=1. Combined with 0xH0000=5(5).
 #[test]
 fn resetif_with_hit_count() {
-    let (ours, theirs) = run_trace(
-        "0xH0000=5(5)_R:0xH0001=1(3)",
-        16, 15,
-        |frame, mem| {
-            mem.write(0, 5); // standard always true
-            // ResetIf condition true on frames 4-6 (3 consecutive → fires on frame 6)
-            mem.write(1, if (4..=6).contains(&frame) { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=5(5)_R:0xH0001=1(3)", 16, 15, |frame, mem| {
+        mem.write(0, 5); // standard always true
+                         // ResetIf condition true on frames 4-6 (3 consecutive → fires on frame 6)
+        mem.write(1, if (4..=6).contains(&frame) { 1 } else { 0 });
+    });
     assert_logs_agree("resetif_with_hit_count", &ours, &theirs);
 }
 
@@ -611,15 +623,11 @@ fn resetif_with_hit_count() {
 /// Combined with 0xH0000=5(4).
 #[test]
 fn pauseif_with_hit_count() {
-    let (ours, theirs) = run_trace(
-        "0xH0000=5(4)_P:0xH0001=1(3)",
-        16, 15,
-        |frame, mem| {
-            mem.write(0, 5);
-            // PauseIf condition true frames 1-4, hits 3 target on frame 3
-            mem.write(1, if (1..=4).contains(&frame) { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=5(4)_P:0xH0001=1(3)", 16, 15, |frame, mem| {
+        mem.write(0, 5);
+        // PauseIf condition true frames 1-4, hits 3 target on frame 3
+        mem.write(1, if (1..=4).contains(&frame) { 1 } else { 0 });
+    });
     assert_logs_agree("pauseif_with_hit_count", &ours, &theirs);
 }
 
@@ -661,7 +669,8 @@ fn or_next_with_hit_count() {
 fn add_hits_two_sources() {
     let (ours, theirs) = run_trace(
         "C:0xH0000=1_C:0xH0001=1_0xH0002=1(5)",
-        16, 6,
+        16,
+        6,
         |frame, mem| {
             if frame >= 1 {
                 mem.write(0, 1); // addhits source 1
@@ -681,7 +690,8 @@ fn add_hits_two_sources() {
 fn add_hits_sub_hits_cancel() {
     let (ours, theirs) = run_trace(
         "C:0xH0000=1_D:0xH0001=1_0xH0002=1(4)",
-        16, 8,
+        16,
+        8,
         |frame, mem| {
             if frame >= 1 {
                 mem.write(0, 1);
@@ -697,16 +707,12 @@ fn add_hits_sub_hits_cancel() {
 /// 0xH0000=1(2)_0xH0001=2(3) — both must independently meet their targets.
 #[test]
 fn multi_standard_hit_counts() {
-    let (ours, theirs) = run_trace(
-        "0xH0000=1(2)_0xH0001=2(3)",
-        16, 6,
-        |frame, mem| {
-            if frame >= 1 {
-                mem.write(0, 1);
-                mem.write(1, 2);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=1(2)_0xH0001=2(3)", 16, 6, |frame, mem| {
+        if frame >= 1 {
+            mem.write(0, 1);
+            mem.write(1, 2);
+        }
+    });
     assert_logs_agree("multi_standard_hit_counts", &ours, &theirs);
 }
 
@@ -730,7 +736,8 @@ fn delta_word_comparison() {
 fn resetif_in_alt_resets_globally() {
     let (ours, theirs) = run_trace(
         "0xH0000=1(3)S0xH0001=1SR:0xH0002=1",
-        16, 10,
+        16,
+        10,
         |frame, mem| {
             mem.write(0, 1); // core condition always true
             if frame >= 5 {
@@ -750,19 +757,15 @@ fn resetif_in_alt_resets_globally() {
 /// Core conditions must be true AND trigger condition must fire.
 #[test]
 fn trigger_flag_with_multi_cond() {
-    let (ours, theirs) = run_trace(
-        "0xH0000=1_0xH0001=2_T:0xH0002=3",
-        16, 6,
-        |frame, mem| {
-            if frame >= 2 {
-                mem.write(0, 1);
-                mem.write(1, 2);
-            }
-            if frame >= 4 {
-                mem.write(2, 3); // trigger fires
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=1_0xH0001=2_T:0xH0002=3", 16, 6, |frame, mem| {
+        if frame >= 2 {
+            mem.write(0, 1);
+            mem.write(1, 2);
+        }
+        if frame >= 4 {
+            mem.write(2, 3); // trigger fires
+        }
+    });
     assert_logs_agree("trigger_flag_with_multi_cond", &ours, &theirs);
 }
 
@@ -770,17 +773,13 @@ fn trigger_flag_with_multi_cond() {
 /// Double indirection: effective address = 0x10 + mem[0] + mem[1].
 #[test]
 fn add_address_chained() {
-    let (ours, theirs) = run_trace(
-        "I:0xH0000_I:0xH0001_0xH0002=7",
-        32, 5,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write(0, 2); // first offset
-                mem.write(1, 3); // second offset
-                mem.write(7, 7); // mem[2+2+3] = mem[7] = 7
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("I:0xH0000_I:0xH0001_0xH0002=7", 32, 5, |frame, mem| {
+        if frame >= 3 {
+            mem.write(0, 2); // first offset
+            mem.write(1, 3); // second offset
+            mem.write(7, 7); // mem[2+2+3] = mem[7] = 7
+        }
+    });
     assert_logs_agree("add_address_chained", &ours, &theirs);
 }
 
@@ -815,7 +814,8 @@ fn constant_core_with_alt() {
 fn mixed_conditions_complex() {
     let (ours, theirs) = run_trace(
         "0xH0000=1(5)_0xH0001>0_R:0xH0002=1",
-        16, 12,
+        16,
+        12,
         |frame, mem| {
             mem.write(0, 1); // hit count condition always true
             if frame >= 3 {
@@ -877,14 +877,10 @@ fn dword_comparison() {
 /// Standard is met before ResetIf fires, so achievement triggers.
 #[test]
 fn resetif_hit_count_standard_triggers_first() {
-    let (ours, theirs) = run_trace(
-        "0xH0000=5(3)_R:0xH0001=1(5)",
-        16, 8,
-        |_frame, mem| {
-            mem.write(0, 5); // standard always true
-            mem.write(1, 1); // resetif condition always true, but needs 5 hits
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=5(3)_R:0xH0001=1(5)", 16, 8, |_frame, mem| {
+        mem.write(0, 5); // standard always true
+        mem.write(1, 1); // resetif condition always true, but needs 5 hits
+    });
     assert_logs_agree("resetif_hit_count_standard_triggers_first", &ours, &theirs);
 }
 
@@ -893,14 +889,10 @@ fn resetif_hit_count_standard_triggers_first() {
 /// ResetIf fires first, clearing standard's progress.
 #[test]
 fn resetif_hit_count_resets_before_standard() {
-    let (ours, theirs) = run_trace(
-        "0xH0000=5(6)_R:0xH0001=1(3)",
-        16, 15,
-        |_frame, mem| {
-            mem.write(0, 5);
-            mem.write(1, 1); // always true → hits accumulate for ResetIf
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=5(6)_R:0xH0001=1(3)", 16, 15, |_frame, mem| {
+        mem.write(0, 5);
+        mem.write(1, 1); // always true → hits accumulate for ResetIf
+    });
     assert_logs_agree("resetif_hit_count_resets_before_standard", &ours, &theirs);
 }
 
@@ -908,16 +900,12 @@ fn resetif_hit_count_resets_before_standard() {
 /// becomes false), preventing trigger until a global reset clears its count.
 #[test]
 fn resetif_hit_count_stays_active() {
-    let (ours, theirs) = run_trace(
-        "0xH0000=5(3)_R:0xH0001=1(2)",
-        16, 12,
-        |frame, mem| {
-            mem.write(0, 5);
-            // ResetIf condition true on frames 0-1 (accumulates 2 hits → fires)
-            // then false from frame 2+. But once target met, stays active.
-            mem.write(1, if frame <= 1 { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=5(3)_R:0xH0001=1(2)", 16, 12, |frame, mem| {
+        mem.write(0, 5);
+        // ResetIf condition true on frames 0-1 (accumulates 2 hits → fires)
+        // then false from frame 2+. But once target met, stays active.
+        mem.write(1, if frame <= 1 { 1 } else { 0 });
+    });
     assert_logs_agree("resetif_hit_count_stays_active", &ours, &theirs);
 }
 
@@ -925,15 +913,11 @@ fn resetif_hit_count_stays_active() {
 /// the standard condition is met, the reset takes priority.
 #[test]
 fn resetif_prevents_same_frame_trigger() {
-    let (ours, theirs) = run_trace(
-        "0xH0000=5(4)_R:0xH0001=1",
-        16, 10,
-        |frame, mem| {
-            mem.write(0, 5);
-            // ResetIf fires on frame 3 (the same frame standard hits 4/4)
-            mem.write(1, if frame == 3 { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=5(4)_R:0xH0001=1", 16, 10, |frame, mem| {
+        mem.write(0, 5);
+        // ResetIf fires on frame 3 (the same frame standard hits 4/4)
+        mem.write(1, if frame == 3 { 1 } else { 0 });
+    });
     assert_logs_agree("resetif_prevents_same_frame_trigger", &ours, &theirs);
 }
 
@@ -943,11 +927,12 @@ fn resetif_prevents_same_frame_trigger() {
 fn resetif_gated_by_and_next() {
     let (ours, theirs) = run_trace(
         "0xH0000=5(4)_N:0xH0002=1_R:0xH0001=1",
-        16, 10,
+        16,
+        10,
         |frame, mem| {
             mem.write(0, 5);
             mem.write(1, 1); // ResetIf condition always true
-            // AndNext gate: only true on frame 3
+                             // AndNext gate: only true on frame 3
             mem.write(2, if frame == 3 { 1 } else { 0 });
         },
     );
@@ -1157,15 +1142,11 @@ fn multiple_bits_combined() {
 /// Hits resume accumulating the frame after unpause.
 #[test]
 fn pauseif_no_hitcount_unpauses() {
-    let (ours, theirs) = run_trace(
-        "0xH0000=5(5)_P:0xH0001=1",
-        16, 10,
-        |frame, mem| {
-            mem.write(0, 5);
-            // Pause on frames 2-3, unpause from frame 4
-            mem.write(1, if frame == 2 || frame == 3 { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=5(5)_P:0xH0001=1", 16, 10, |frame, mem| {
+        mem.write(0, 5);
+        // Pause on frames 2-3, unpause from frame 4
+        mem.write(1, if frame == 2 || frame == 3 { 1 } else { 0 });
+    });
     assert_logs_agree("pauseif_no_hitcount_unpauses", &ours, &theirs);
 }
 
@@ -1175,7 +1156,8 @@ fn pauseif_no_hitcount_unpauses() {
 fn pauseif_suppresses_resetif() {
     let (ours, theirs) = run_trace(
         "0xH0000=5(4)_P:0xH0002=1_R:0xH0001=1",
-        16, 12,
+        16,
+        12,
         |frame, mem| {
             mem.write(0, 5);
             // ResetIf condition always true
@@ -1193,7 +1175,8 @@ fn pauseif_suppresses_resetif() {
 fn multiple_pauseif() {
     let (ours, theirs) = run_trace(
         "0xH0000=5(4)_P:0xH0001=1_P:0xH0002=1",
-        16, 10,
+        16,
+        10,
         |frame, mem| {
             mem.write(0, 5);
             // First PauseIf true on frames 1-2
@@ -1211,7 +1194,8 @@ fn multiple_pauseif() {
 fn pauseif_hitcount_permanent_until_reset() {
     let (ours, theirs) = run_trace(
         "0xH0000=5(3)_P:0xH0001=1(2)_R:0xH0002=1",
-        16, 15,
+        16,
+        15,
         |frame, mem| {
             mem.write(0, 5);
             // PauseIf condition true frames 0-1, hits target 2 on frame 1
@@ -1274,21 +1258,17 @@ fn sub_source_multiply() {
 /// MeasuredIf gates is_true just like Standard. When false, condset unsatisfied.
 #[test]
 fn measured_if_blocks_when_false() {
-    let (ours, theirs) = run_trace(
-        "Q:0xH0001=1_0xH0000=5",
-        16, 8,
-        |frame, mem| {
-            // Frame 0: MeasuredIf false (mem[1]=0≠1), Standard false (mem[0]=0≠5). Not triggered.
-            // Frame 2: Standard true, MeasuredIf still false → blocked.
-            // Frame 4: Both true → triggers.
-            if frame >= 2 {
-                mem.write(0, 5); // Standard becomes true
-            }
-            if frame >= 4 {
-                mem.write(1, 1); // MeasuredIf becomes true
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("Q:0xH0001=1_0xH0000=5", 16, 8, |frame, mem| {
+        // Frame 0: MeasuredIf false (mem[1]=0≠1), Standard false (mem[0]=0≠5). Not triggered.
+        // Frame 2: Standard true, MeasuredIf still false → blocked.
+        // Frame 4: Both true → triggers.
+        if frame >= 2 {
+            mem.write(0, 5); // Standard becomes true
+        }
+        if frame >= 4 {
+            mem.write(1, 1); // MeasuredIf becomes true
+        }
+    });
     assert_logs_agree("measured_if_blocks_when_false", &ours, &theirs);
 }
 
@@ -1296,16 +1276,12 @@ fn measured_if_blocks_when_false() {
 /// mem[1] starts at 0, so MeasuredIf(mem[1]=0) is true from the start.
 #[test]
 fn measured_if_true_allows_trigger() {
-    let (ours, theirs) = run_trace(
-        "Q:0xH0001=0_0xH0000=5",
-        16, 5,
-        |frame, mem| {
-            if frame >= 2 {
-                mem.write(0, 5); // Standard becomes true
-            }
-            // mem[1] stays 0, MeasuredIf always true
-        },
-    );
+    let (ours, theirs) = run_trace("Q:0xH0001=0_0xH0000=5", 16, 5, |frame, mem| {
+        if frame >= 2 {
+            mem.write(0, 5); // Standard becomes true
+        }
+        // mem[1] stays 0, MeasuredIf always true
+    });
     assert_logs_agree("measured_if_true_allows_trigger", &ours, &theirs);
 }
 
@@ -1314,15 +1290,11 @@ fn measured_if_true_allows_trigger() {
 /// MeasuredIf false delays trigger.
 #[test]
 fn measured_if_with_measured_hit_target() {
-    let (ours, theirs) = run_trace(
-        "M:0xH0000=5(3)_Q:0xH0001=1",
-        16, 8,
-        |frame, mem| {
-            mem.write(0, 5); // Measured condition always true
-            // MeasuredIf false on frames 0-3, true from frame 4
-            mem.write(1, if frame >= 4 { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("M:0xH0000=5(3)_Q:0xH0001=1", 16, 8, |frame, mem| {
+        mem.write(0, 5); // Measured condition always true
+                         // MeasuredIf false on frames 0-3, true from frame 4
+        mem.write(1, if frame >= 4 { 1 } else { 0 });
+    });
     assert_logs_agree("measured_if_with_measured_hit_target", &ours, &theirs);
 }
 
@@ -1335,16 +1307,12 @@ fn measured_if_with_measured_hit_target() {
 /// 0xH0000>d0xH0000 fires when value increases. Paused during value changes.
 #[test]
 fn delta_after_pause_value_changes() {
-    let (ours, theirs) = run_trace(
-        "0xH0000>d0xH0000_P:0xH0001=1",
-        16, 10,
-        |frame, mem| {
-            // Value at addr 0 increases every frame: 0,1,2,...
-            mem.write(0, frame as u8);
-            // Pause on frames 2-4
-            mem.write(1, if (2..=4).contains(&frame) { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000>d0xH0000_P:0xH0001=1", 16, 10, |frame, mem| {
+        // Value at addr 0 increases every frame: 0,1,2,...
+        mem.write(0, frame as u8);
+        // Pause on frames 2-4
+        mem.write(1, if (2..=4).contains(&frame) { 1 } else { 0 });
+    });
     assert_logs_agree("delta_after_pause_value_changes", &ours, &theirs);
 }
 
@@ -1352,19 +1320,15 @@ fn delta_after_pause_value_changes() {
 /// Without the fix, stale delta would cause incorrect trigger after unpause.
 #[test]
 fn delta_after_pause_value_stabilizes() {
-    let (ours, theirs) = run_trace(
-        "0xH0000>d0xH0000_P:0xH0001=1",
-        16, 10,
-        |frame, mem| {
-            // Value changes to 5 on frame 1, then stays 5 during pause and after.
-            // After unpause, delta should be 5 (same as current) → NOT triggered.
-            if frame >= 1 {
-                mem.write(0, 5);
-            }
-            // Pause on frames 2-5
-            mem.write(1, if (2..=5).contains(&frame) { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000>d0xH0000_P:0xH0001=1", 16, 10, |frame, mem| {
+        // Value changes to 5 on frame 1, then stays 5 during pause and after.
+        // After unpause, delta should be 5 (same as current) → NOT triggered.
+        if frame >= 1 {
+            mem.write(0, 5);
+        }
+        // Pause on frames 2-5
+        mem.write(1, if (2..=5).contains(&frame) { 1 } else { 0 });
+    });
     assert_logs_agree("delta_after_pause_value_stabilizes", &ours, &theirs);
 }
 
@@ -1372,21 +1336,17 @@ fn delta_after_pause_value_stabilizes() {
 /// during paused frames, not stay stale.
 #[test]
 fn prior_after_pause() {
-    let (ours, theirs) = run_trace(
-        "p0xH0000=5_P:0xH0001=1",
-        16, 10,
-        |frame, mem| {
-            // Value goes: 0,0,5,10,10,10,... (changes on frames 2 and 3)
-            if frame >= 3 {
-                mem.write(0, 10);
-            } else if frame >= 2 {
-                mem.write(0, 5);
-            }
-            // Pause on frames 2-4 (value changes from 0→5→10 during pause)
-            // After unpause on frame 5: value=10, prior=5. prior(5)=5 → triggers!
-            mem.write(1, if (2..=4).contains(&frame) { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("p0xH0000=5_P:0xH0001=1", 16, 10, |frame, mem| {
+        // Value goes: 0,0,5,10,10,10,... (changes on frames 2 and 3)
+        if frame >= 3 {
+            mem.write(0, 10);
+        } else if frame >= 2 {
+            mem.write(0, 5);
+        }
+        // Pause on frames 2-4 (value changes from 0→5→10 during pause)
+        // After unpause on frame 5: value=10, prior=5. prior(5)=5 → triggers!
+        mem.write(1, if (2..=4).contains(&frame) { 1 } else { 0 });
+    });
     assert_logs_agree("prior_after_pause", &ours, &theirs);
 }
 
@@ -1394,16 +1354,12 @@ fn prior_after_pause() {
 /// from stale delta values.
 #[test]
 fn delta_hit_count_after_pause() {
-    let (ours, theirs) = run_trace(
-        "0xH0000>d0xH0000(3)_P:0xH0001=1",
-        16, 12,
-        |frame, mem| {
-            // Value increases every frame
-            mem.write(0, frame as u8);
-            // Pause on frames 3-5
-            mem.write(1, if (3..=5).contains(&frame) { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000>d0xH0000(3)_P:0xH0001=1", 16, 12, |frame, mem| {
+        // Value increases every frame
+        mem.write(0, frame as u8);
+        // Pause on frames 3-5
+        mem.write(1, if (3..=5).contains(&frame) { 1 } else { 0 });
+    });
     assert_logs_agree("delta_hit_count_after_pause", &ours, &theirs);
 }
 
@@ -1420,17 +1376,13 @@ fn waiting_resets_hits_while_satisfied() {
     // mem[0]=1 always, mem[1]=1 for frames 0-5 then becomes 0.
     // While both true → WAITING (resets hits). When mem[1]=0 → exit WAITING.
     // Then hits accumulate from 0.
-    let (ours, theirs) = run_trace(
-        "0xH0000=1(3)_0xH0001=1",
-        16, 15,
-        |frame, mem| {
-            mem.write(0, 1);
-            mem.write(1, if frame <= 5 { 1 } else { 0 });
-            // Frame 6: mem[1]=0 → would_trigger false → exit WAITING
-            // But mem[1]=0 means standard[1] false → not satisfied
-            // Frame 7+: need BOTH true. mem[1] still 0 → never triggers
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=1(3)_0xH0001=1", 16, 15, |frame, mem| {
+        mem.write(0, 1);
+        mem.write(1, if frame <= 5 { 1 } else { 0 });
+        // Frame 6: mem[1]=0 → would_trigger false → exit WAITING
+        // But mem[1]=0 means standard[1] false → not satisfied
+        // Frame 7+: need BOTH true. mem[1] still 0 → never triggers
+    });
     assert_logs_agree("waiting_resets_hits_while_satisfied", &ours, &theirs);
 }
 
@@ -1442,16 +1394,12 @@ fn waiting_hit_count_accumulation() {
     // mem[0]=5 always, mem[1]=0 initially → hit count condition met but level
     // condition false → exits WAITING. Then when mem[1] becomes non-zero,
     // triggers if hit count still met.
-    let (ours, theirs) = run_trace(
-        "0xH0000=5(2)_0xH0001!=0",
-        16, 8,
-        |frame, mem| {
-            mem.write(0, 5);
-            if frame >= 3 {
-                mem.write(1, 1);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=5(2)_0xH0001!=0", 16, 8, |frame, mem| {
+        mem.write(0, 5);
+        if frame >= 3 {
+            mem.write(1, 1);
+        }
+    });
     assert_logs_agree("waiting_hit_count_accumulation", &ours, &theirs);
 }
 
@@ -1466,14 +1414,10 @@ fn pauseif_hits_increment_during_pause() {
     // P:0xH0001=1(2)_0xH0000=5(3) — PauseIf needs 2 hits, standard needs 3.
     // mem[1]=1 always → PauseIf fires on frame 1 (hit target 2 met).
     // Stays paused forever. Never triggers.
-    let (ours, theirs) = run_trace(
-        "0xH0000=5(3)_P:0xH0001=1(2)",
-        16, 10,
-        |_frame, mem| {
-            mem.write(0, 5);
-            mem.write(1, 1);
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=5(3)_P:0xH0001=1(2)", 16, 10, |_frame, mem| {
+        mem.write(0, 5);
+        mem.write(1, 1);
+    });
     assert_logs_agree("pauseif_hits_increment_during_pause", &ours, &theirs);
 }
 
@@ -1481,15 +1425,11 @@ fn pauseif_hits_increment_during_pause() {
 /// then false. Should stay paused permanently.
 #[test]
 fn pauseif_hitcount_then_false_stays_paused() {
-    let (ours, theirs) = run_trace(
-        "0xH0000=5(3)_P:0xH0001=1(2)",
-        16, 12,
-        |frame, mem| {
-            mem.write(0, 5);
-            // PauseIf condition true frames 0-1 (hits reach 2), false from frame 2
-            mem.write(1, if frame <= 1 { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=5(3)_P:0xH0001=1(2)", 16, 12, |frame, mem| {
+        mem.write(0, 5);
+        // PauseIf condition true frames 0-1 (hits reach 2), false from frame 2
+        mem.write(1, if frame <= 1 { 1 } else { 0 });
+    });
     assert_logs_agree("pauseif_hitcount_then_false_stays_paused", &ours, &theirs);
 }
 
@@ -1500,30 +1440,22 @@ fn pauseif_hitcount_then_false_stays_paused() {
 /// Float equal: fF0000=f3.5. Memory starts at 0.0, set to 3.5 on frame 3.
 #[test]
 fn float_equal() {
-    let (ours, theirs) = run_trace(
-        "fF0000=f3.5",
-        16, 10,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write_f32_le(0, 3.5);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("fF0000=f3.5", 16, 10, |frame, mem| {
+        if frame >= 3 {
+            mem.write_f32_le(0, 3.5);
+        }
+    });
     assert_logs_agree("float_equal", &ours, &theirs);
 }
 
 /// Float greater: fF0000>f1.0. Memory starts at 0.0, set to 2.5 on frame 2.
 #[test]
 fn float_greater() {
-    let (ours, theirs) = run_trace(
-        "fF0000>f1.0",
-        16, 10,
-        |frame, mem| {
-            if frame >= 2 {
-                mem.write_f32_le(0, 2.5);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("fF0000>f1.0", 16, 10, |frame, mem| {
+        if frame >= 2 {
+            mem.write_f32_le(0, 2.5);
+        }
+    });
     assert_logs_agree("float_greater", &ours, &theirs);
 }
 
@@ -1532,15 +1464,11 @@ fn float_greater() {
 /// true (0.0 is not less than -1.0). Then set memory to -5.0 on frame 3.
 #[test]
 fn float_less() {
-    let (ours, theirs) = run_trace(
-        "fF0000<f-1.0",
-        16, 10,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write_f32_le(0, -5.0);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("fF0000<f-1.0", 16, 10, |frame, mem| {
+        if frame >= 3 {
+            mem.write_f32_le(0, -5.0);
+        }
+    });
     assert_logs_agree("float_less", &ours, &theirs);
 }
 
@@ -1548,15 +1476,11 @@ fn float_less() {
 /// becomes 1.0 on frame 2.
 #[test]
 fn float_not_equal() {
-    let (ours, theirs) = run_trace(
-        "fF0000!=f0.0",
-        16, 10,
-        |frame, mem| {
-            if frame >= 2 {
-                mem.write_f32_le(0, 1.0);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("fF0000!=f0.0", 16, 10, |frame, mem| {
+        if frame >= 2 {
+            mem.write_f32_le(0, 1.0);
+        }
+    });
     assert_logs_agree("float_not_equal", &ours, &theirs);
 }
 
@@ -1564,15 +1488,11 @@ fn float_not_equal() {
 /// on frame 3. The integer 3 should be promoted to float for comparison.
 #[test]
 fn float_mem_vs_integer_const() {
-    let (ours, theirs) = run_trace(
-        "fF0000=3",
-        16, 10,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write_f32_le(0, 3.0);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("fF0000=3", 16, 10, |frame, mem| {
+        if frame >= 3 {
+            mem.write_f32_le(0, 3.0);
+        }
+    });
     assert_logs_agree("float_mem_vs_integer_const", &ours, &theirs);
 }
 
@@ -1580,30 +1500,22 @@ fn float_mem_vs_integer_const() {
 /// Memory starts at 0, set to 42 on frame 3.
 #[test]
 fn integer_mem_vs_float_const() {
-    let (ours, theirs) = run_trace(
-        "0xX0000=f42.0",
-        16, 10,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write_u32_le(0, 42);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("0xX0000=f42.0", 16, 10, |frame, mem| {
+        if frame >= 3 {
+            mem.write_u32_le(0, 42);
+        }
+    });
     assert_logs_agree("integer_mem_vs_float_const", &ours, &theirs);
 }
 
 /// Float delta: dfF0000!=fF0000. Fire when the float value changes.
 #[test]
 fn float_delta() {
-    let (ours, theirs) = run_trace(
-        "dfF0000!=fF0000",
-        16, 10,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write_f32_le(0, 1.5);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("dfF0000!=fF0000", 16, 10, |frame, mem| {
+        if frame >= 3 {
+            mem.write_f32_le(0, 1.5);
+        }
+    });
     assert_logs_agree("float_delta", &ours, &theirs);
 }
 
@@ -1611,15 +1523,11 @@ fn float_delta() {
 /// Set to 1.0 on frame 2 — should trigger on frame 4 (3 frames of true).
 #[test]
 fn float_hit_count() {
-    let (ours, theirs) = run_trace(
-        "fF0000>f0.0(3)",
-        16, 10,
-        |frame, mem| {
-            if frame >= 2 {
-                mem.write_f32_le(0, 1.0);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("fF0000>f0.0(3)", 16, 10, |frame, mem| {
+        if frame >= 2 {
+            mem.write_f32_le(0, 1.0);
+        }
+    });
     assert_logs_agree("float_hit_count", &ours, &theirs);
 }
 
@@ -1627,27 +1535,19 @@ fn float_hit_count() {
 /// Two float addresses summed and compared to float constant.
 #[test]
 fn float_add_source() {
-    let (ours, theirs) = run_trace(
-        "A:fF0000_fF0004>f5.0",
-        16, 10,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write_f32_le(0, 2.5);
-                mem.write_f32_le(4, 3.0);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("A:fF0000_fF0004>f5.0", 16, 10, |frame, mem| {
+        if frame >= 3 {
+            mem.write_f32_le(0, 2.5);
+            mem.write_f32_le(4, 3.0);
+        }
+    });
     assert_logs_agree("float_add_source", &ours, &theirs);
 }
 
 /// Float impossible: fF0000=f999.0 — never true since we never write 999.0.
 #[test]
 fn float_impossible() {
-    let (ours, theirs) = run_trace(
-        "fF0000=f999.0",
-        16, 10,
-        |_frame, _mem| {},
-    );
+    let (ours, theirs) = run_trace("fF0000=f999.0", 16, 10, |_frame, _mem| {});
     assert_logs_agree("float_impossible", &ours, &theirs);
     assert!(ours.iter().all(|b| !b), "should never trigger");
 }
@@ -1655,20 +1555,16 @@ fn float_impossible() {
 /// Float big-endian: fB0000=f3.5. Write 3.5 in big-endian byte order.
 #[test]
 fn float_big_endian() {
-    let (ours, theirs) = run_trace(
-        "fB0000=f3.5",
-        16, 10,
-        |frame, mem| {
-            if frame >= 3 {
-                let bits = 3.5f32.to_bits();
-                // Write big-endian: MSB first
-                mem.write(0, (bits >> 24) as u8);
-                mem.write(1, (bits >> 16) as u8);
-                mem.write(2, (bits >> 8) as u8);
-                mem.write(3, bits as u8);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("fB0000=f3.5", 16, 10, |frame, mem| {
+        if frame >= 3 {
+            let bits = 3.5f32.to_bits();
+            // Write big-endian: MSB first
+            mem.write(0, (bits >> 24) as u8);
+            mem.write(1, (bits >> 16) as u8);
+            mem.write(2, (bits >> 8) as u8);
+            mem.write(3, bits as u8);
+        }
+    });
     assert_logs_agree("float_big_endian", &ours, &theirs);
 }
 
@@ -1680,17 +1576,13 @@ fn float_big_endian() {
 /// 3+4+5 = 12 > 10 fires on frame 3.
 #[test]
 fn add_source_triple_chain() {
-    let (ours, theirs) = run_trace(
-        "A:0xH0000_A:0xH0001_0xH0002>10",
-        16, 8,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write(0, 3);
-                mem.write(1, 4);
-                mem.write(2, 5);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("A:0xH0000_A:0xH0001_0xH0002>10", 16, 8, |frame, mem| {
+        if frame >= 3 {
+            mem.write(0, 3);
+            mem.write(1, 4);
+            mem.write(2, 5);
+        }
+    });
     assert_logs_agree("add_source_triple_chain", &ours, &theirs);
 }
 
@@ -1700,16 +1592,12 @@ fn add_source_triple_chain() {
 /// This should trigger from frame 3 onward.
 #[test]
 fn sub_source_underflow() {
-    let (ours, theirs) = run_trace(
-        "A:0xH0000_B:0xH0001_0=0",
-        16, 8,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write(0, 2);
-                mem.write(1, 5);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("A:0xH0000_B:0xH0001_0=0", 16, 8, |frame, mem| {
+        if frame >= 3 {
+            mem.write(0, 2);
+            mem.write(1, 5);
+        }
+    });
     // "A:0xH0+B:0xH1_0=0" → accum = 2-5 = -3, then 0+accum = -3 as u32 = large.
     // 0=0 is always true from boot so WAITING blocks until it's not true then becomes true.
     // Actually with accum, the effective LHS is (0 + (-3)) cast to u32. The comparison is
@@ -1722,15 +1610,11 @@ fn sub_source_underflow() {
 /// Should behave like Standard: true when mem[0]=5.
 #[test]
 fn measured_value_mode_standard_behavior() {
-    let (ours, theirs) = run_trace(
-        "M:0xH0000=5",
-        16, 8,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write(0, 5);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("M:0xH0000=5", 16, 8, |frame, mem| {
+        if frame >= 3 {
+            mem.write(0, 5);
+        }
+    });
     assert_logs_agree("measured_value_mode", &ours, &theirs);
 }
 
@@ -1738,16 +1622,12 @@ fn measured_value_mode_standard_behavior() {
 /// Core + alt must both be true.
 #[test]
 fn measured_hit_count_with_alt() {
-    let (ours, theirs) = run_trace(
-        "M:0xH0000=5(3)S0xH0001=1",
-        16, 12,
-        |frame, mem| {
-            mem.write(0, 5); // always true
-            if frame >= 2 {
-                mem.write(1, 1); // alt true from frame 2
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("M:0xH0000=5(3)S0xH0001=1", 16, 12, |frame, mem| {
+        mem.write(0, 5); // always true
+        if frame >= 2 {
+            mem.write(1, 1); // alt true from frame 2
+        }
+    });
     assert_logs_agree("measured_hit_count_with_alt", &ours, &theirs);
 }
 
@@ -1757,11 +1637,12 @@ fn measured_hit_count_with_alt() {
 fn resetif_in_alt() {
     let (ours, theirs) = run_trace(
         "0xH0000=5(5)S0xH0001=1_R:0xH0002=1",
-        16, 20,
+        16,
+        20,
         |frame, mem| {
             mem.write(0, 5); // core: always true, needs 5 hits
             mem.write(1, 1); // alt standard: always true
-            // Reset on frame 3, clearing core's hit count
+                             // Reset on frame 3, clearing core's hit count
             mem.write(2, if frame == 3 { 1 } else { 0 });
         },
     );
@@ -1774,12 +1655,13 @@ fn resetif_in_alt() {
 fn pauseif_in_alt() {
     let (ours, theirs) = run_trace(
         "0xH0000=5SP:0xH0001=1_0xH0002=1S0xH0003=1",
-        16, 12,
+        16,
+        12,
         |frame, mem| {
             mem.write(0, 5); // core always true
             mem.write(1, 1); // alt1 paused always
             mem.write(2, 1); // alt1 standard (but paused)
-            // alt2: only true from frame 4
+                             // alt2: only true from frame 4
             if frame >= 4 {
                 mem.write(3, 1);
             }
@@ -1792,17 +1674,13 @@ fn pauseif_in_alt() {
 /// The AndNext gates the PauseIf — should only pause when BOTH are true.
 #[test]
 fn andnext_gates_pauseif() {
-    let (ours, theirs) = run_trace(
-        "0xH0002=5_N:0xH0000=1_P:0xH0001=1",
-        16, 12,
-        |frame, mem| {
-            mem.write(2, 5); // standard condition always true
-            // AndNext condition: only true from frame 4
-            mem.write(0, if frame >= 4 { 1 } else { 0 });
-            // PauseIf base: always true (but gated by AndNext)
-            mem.write(1, 1);
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0002=5_N:0xH0000=1_P:0xH0001=1", 16, 12, |frame, mem| {
+        mem.write(2, 5); // standard condition always true
+                         // AndNext condition: only true from frame 4
+        mem.write(0, if frame >= 4 { 1 } else { 0 });
+        // PauseIf base: always true (but gated by AndNext)
+        mem.write(1, 1);
+    });
     assert_logs_agree("andnext_gates_pauseif", &ours, &theirs);
 }
 
@@ -1810,15 +1688,11 @@ fn andnext_gates_pauseif() {
 /// Any of the three being true should pass. All start false, addr2 true from frame 3.
 #[test]
 fn ornext_three_arms() {
-    let (ours, theirs) = run_trace(
-        "O:0xH0000=1_O:0xH0001=1_0xH0002=1",
-        16, 8,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write(2, 1);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("O:0xH0000=1_O:0xH0001=1_0xH0002=1", 16, 8, |frame, mem| {
+        if frame >= 3 {
+            mem.write(2, 1);
+        }
+    });
     assert_logs_agree("ornext_three_arms", &ours, &theirs);
 }
 
@@ -1828,7 +1702,8 @@ fn ornext_three_arms() {
 fn addhits_multiple_contributors() {
     let (ours, theirs) = run_trace(
         "C:0xH0000=1_C:0xH0001=1_0xH0002=1(5)",
-        16, 10,
+        16,
+        10,
         |frame, mem| {
             // addr0: true on even frames, addr1: true on odd frames
             // addr2: always true
@@ -1848,10 +1723,11 @@ fn addhits_multiple_contributors() {
 fn subhits_reduces_total() {
     let (ours, theirs) = run_trace(
         "C:0xH0000=1_D:0xH0001=1_0xH0002=1(10)",
-        16, 20,
+        16,
+        20,
         |frame, mem| {
             mem.write(0, 1); // always contributes hits
-            // addr1 true first 5 frames, subtracting hits
+                             // addr1 true first 5 frames, subtracting hits
             mem.write(1, if frame < 5 { 1 } else { 0 });
             mem.write(2, 1); // standard always true
         },
@@ -1863,17 +1739,13 @@ fn subhits_reduces_total() {
 /// Achievement is primed when trigger passes, but ResetIf prevents firing.
 #[test]
 fn trigger_with_resetif() {
-    let (ours, theirs) = run_trace(
-        "T:0xH0000>0_R:0xH0001=1",
-        16, 12,
-        |frame, mem| {
-            if frame >= 2 {
-                mem.write(0, 5); // trigger condition true
-            }
-            // Reset active frames 2-4, released from frame 5
-            mem.write(1, if frame >= 2 && frame <= 4 { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("T:0xH0000>0_R:0xH0001=1", 16, 12, |frame, mem| {
+        if frame >= 2 {
+            mem.write(0, 5); // trigger condition true
+        }
+        // Reset active frames 2-4, released from frame 5
+        mem.write(1, if frame >= 2 && frame <= 4 { 1 } else { 0 });
+    });
     assert_logs_agree("trigger_with_resetif", &ours, &theirs);
 }
 
@@ -1881,15 +1753,11 @@ fn trigger_with_resetif() {
 /// ResetNextIf clears hits on the Standard condition when addr0=1.
 #[test]
 fn resetnextif_clears_hits() {
-    let (ours, theirs) = run_trace(
-        "Z:0xH0000=1_0xH0001=5(3)",
-        16, 15,
-        |frame, mem| {
-            mem.write(1, 5); // standard always true
-            // ResetNext fires on frame 3, clearing Standard's hit count
-            mem.write(0, if frame == 3 { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("Z:0xH0000=1_0xH0001=5(3)", 16, 15, |frame, mem| {
+        mem.write(1, 5); // standard always true
+                         // ResetNext fires on frame 3, clearing Standard's hit count
+        mem.write(0, if frame == 3 { 1 } else { 0 });
+    });
     assert_logs_agree("resetnextif_clears_hits", &ours, &theirs);
 }
 
@@ -1898,15 +1766,11 @@ fn resetnextif_clears_hits() {
 /// Start: addr0=0, addr1=0 → 0*3+0 = 0. Frame 3: addr0=4 → 4*3+0=12 > 10.
 #[test]
 fn add_source_multiply_chain() {
-    let (ours, theirs) = run_trace(
-        "A:0xH0000*3_0xH0001>10",
-        16, 8,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write(0, 4);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("A:0xH0000*3_0xH0001>10", 16, 8, |frame, mem| {
+        if frame >= 3 {
+            mem.write(0, 4);
+        }
+    });
     assert_logs_agree("add_source_multiply_chain", &ours, &theirs);
 }
 
@@ -1915,33 +1779,34 @@ fn add_source_multiply_chain() {
 /// should still work correctly.
 #[test]
 fn delta_persists_through_reset() {
-    let (ours, theirs) = run_trace(
-        "d0xH0000!=0xH0000_R:0xH0001=1",
-        16, 12,
-        |frame, mem| {
-            // Change value on frames 3 and 7
-            mem.write(0, if frame >= 3 && frame < 5 { 10 } else if frame >= 7 { 20 } else { 0 });
-            // Reset on frame 4
-            mem.write(1, if frame == 4 { 1 } else { 0 });
-        },
-    );
+    let (ours, theirs) = run_trace("d0xH0000!=0xH0000_R:0xH0001=1", 16, 12, |frame, mem| {
+        // Change value on frames 3 and 7
+        mem.write(
+            0,
+            if frame >= 3 && frame < 5 {
+                10
+            } else if frame >= 7 {
+                20
+            } else {
+                0
+            },
+        );
+        // Reset on frame 4
+        mem.write(1, if frame == 4 { 1 } else { 0 });
+    });
     assert_logs_agree("delta_persists_through_reset", &ours, &theirs);
 }
 
 /// Multiple standard conditions: 0xH0=1_0xH1=2_0xH2=3. All must be true.
 #[test]
 fn multiple_standard_conditions() {
-    let (ours, theirs) = run_trace(
-        "0xH0000=1_0xH0001=2_0xH0002=3",
-        16, 8,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write(0, 1);
-                mem.write(1, 2);
-                mem.write(2, 3);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("0xH0000=1_0xH0001=2_0xH0002=3", 16, 8, |frame, mem| {
+        if frame >= 3 {
+            mem.write(0, 1);
+            mem.write(1, 2);
+            mem.write(2, 3);
+        }
+    });
     assert_logs_agree("multiple_standard_conditions", &ours, &theirs);
 }
 
@@ -1949,17 +1814,13 @@ fn multiple_standard_conditions() {
 /// 16-bit value at addr0-1 starts at 0, set to 65000 on frame 3.
 #[test]
 fn word_high_value() {
-    let (ours, theirs) = run_trace(
-        "0x 0000>60000",
-        16, 8,
-        |frame, mem| {
-            if frame >= 3 {
-                // 65000 = 0xFDE8 → LE: 0xE8, 0xFD
-                mem.write(0, 0xE8);
-                mem.write(1, 0xFD);
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("0x 0000>60000", 16, 8, |frame, mem| {
+        if frame >= 3 {
+            // 65000 = 0xFDE8 → LE: 0xE8, 0xFD
+            mem.write(0, 0xE8);
+            mem.write(1, 0xFD);
+        }
+    });
     assert_logs_agree("word_high_value", &ours, &theirs);
 }
 
@@ -1967,17 +1828,13 @@ fn word_high_value() {
 /// Result should be float subtraction.
 #[test]
 fn float_sub_source() {
-    let (ours, theirs) = run_trace(
-        "A:fF0000_B:fF0004_fF0008>f0.0",
-        16, 10,
-        |frame, mem| {
-            if frame >= 3 {
-                mem.write_f32_le(0, 10.0);
-                mem.write_f32_le(4, 3.0); // subtracted
-                mem.write_f32_le(8, 0.0); // terminal: 10.0-3.0+0.0 = 7.0 > 0.0
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("A:fF0000_B:fF0004_fF0008>f0.0", 16, 10, |frame, mem| {
+        if frame >= 3 {
+            mem.write_f32_le(0, 10.0);
+            mem.write_f32_le(4, 3.0); // subtracted
+            mem.write_f32_le(8, 0.0); // terminal: 10.0-3.0+0.0 = 7.0 > 0.0
+        }
+    });
     assert_logs_agree("float_sub_source", &ours, &theirs);
 }
 
@@ -1985,19 +1842,15 @@ fn float_sub_source() {
 /// When float at addr0 is 0.0, pause. When not 0.0, allow trigger.
 #[test]
 fn float_pauseif() {
-    let (ours, theirs) = run_trace(
-        "P:fF0000=f0.0_fF0004>f1.0",
-        16, 10,
-        |frame, mem| {
-            // Float at addr0 = 0.0 (pause) until frame 3
-            if frame >= 3 {
-                mem.write_f32_le(0, 1.0); // unpause
-            }
-            if frame >= 2 {
-                mem.write_f32_le(4, 2.0); // trigger condition
-            }
-        },
-    );
+    let (ours, theirs) = run_trace("P:fF0000=f0.0_fF0004>f1.0", 16, 10, |frame, mem| {
+        // Float at addr0 = 0.0 (pause) until frame 3
+        if frame >= 3 {
+            mem.write_f32_le(0, 1.0); // unpause
+        }
+        if frame >= 2 {
+            mem.write_f32_le(4, 2.0); // trigger condition
+        }
+    });
     assert_logs_agree("float_pauseif", &ours, &theirs);
 }
 
@@ -2005,15 +1858,11 @@ fn float_pauseif() {
 /// Reset when float > 5.0, standard needs 3 hits of float == 3.0.
 #[test]
 fn float_resetif() {
-    let (ours, theirs) = run_trace(
-        "R:fF0000>f5.0_fF0004=f3.0(3)",
-        16, 12,
-        |frame, mem| {
-            mem.write_f32_le(4, 3.0); // standard always true
-            // Reset on frame 2
-            mem.write_f32_le(0, if frame == 2 { 10.0 } else { 0.0 });
-        },
-    );
+    let (ours, theirs) = run_trace("R:fF0000>f5.0_fF0004=f3.0(3)", 16, 12, |frame, mem| {
+        mem.write_f32_le(4, 3.0); // standard always true
+                                  // Reset on frame 2
+        mem.write_f32_le(0, if frame == 2 { 10.0 } else { 0.0 });
+    });
     assert_logs_agree("float_resetif", &ours, &theirs);
 }
 
@@ -2087,26 +1936,20 @@ fn assert_values_agree(tag: &str, ours: &[i64], theirs: &[i32]) {
 #[test]
 fn value_single_byte() {
     // Legacy format for rcheevos (no flag prefix), condition format for rveevr.
-    let (ours, theirs) = run_value_trace(
-        "0xH0000", "0xH0000",
-        16, 4,
-        |frame, mem| { mem.write(0, (frame as u8 + 1) * 10); },
-    );
+    let (ours, theirs) = run_value_trace("0xH0000", "0xH0000", 16, 4, |frame, mem| {
+        mem.write(0, (frame as u8 + 1) * 10);
+    });
     assert_values_agree("value_single_byte", &ours, &theirs);
 }
 
 /// Single word (16-bit LE) operand.
 #[test]
 fn value_single_word() {
-    let (ours, theirs) = run_value_trace(
-        "0x 0000", "0x 0000",
-        16, 4,
-        |frame, mem| {
-            let v = (frame as u16 + 1) * 1000;
-            mem.write(0, v as u8);
-            mem.write(1, (v >> 8) as u8);
-        },
-    );
+    let (ours, theirs) = run_value_trace("0x 0000", "0x 0000", 16, 4, |frame, mem| {
+        let v = (frame as u16 + 1) * 1000;
+        mem.write(0, v as u8);
+        mem.write(1, (v >> 8) as u8);
+    });
     assert_values_agree("value_single_word", &ours, &theirs);
 }
 
@@ -2120,7 +1963,8 @@ fn value_add_source() {
     let (ours, theirs) = run_value_trace(
         "A:0xH0000_0xH0001",
         "A:0xH0000_M:0xH0001",
-        16, 4,
+        16,
+        4,
         |frame, mem| {
             mem.write(0, frame as u8 * 5);
             mem.write(1, 100);
@@ -2135,7 +1979,8 @@ fn value_add_source_triple() {
     let (ours, theirs) = run_value_trace(
         "A:0xH0000_A:0xH0001_0xH0002",
         "A:0xH0000_A:0xH0001_M:0xH0002",
-        16, 4,
+        16,
+        4,
         |frame, mem| {
             mem.write(0, 10);
             mem.write(1, 20);
@@ -2155,7 +2000,8 @@ fn value_sub_source() {
     let (ours, theirs) = run_value_trace(
         "A:0xH0000_B:0xH0001_0xH0002",
         "A:0xH0000_B:0xH0001_M:0xH0002",
-        16, 4,
+        16,
+        4,
         |_frame, mem| {
             mem.write(0, 100);
             mem.write(1, 30);
@@ -2171,7 +2017,8 @@ fn value_sub_source_negative() {
     let (ours, theirs) = run_value_trace(
         "B:0xH0000_0xH0001",
         "B:0xH0000_M:0xH0001",
-        16, 4,
+        16,
+        4,
         |_frame, mem| {
             mem.write(0, 50); // subtract 50
             mem.write(1, 10); // terminal +10 → -50+10 = -40
@@ -2190,10 +2037,11 @@ fn value_multiply() {
     let (ours, theirs) = run_value_trace(
         "A:0xH0000*3_0xH0001",
         "A:0xH0000*3_M:0xH0001",
-        16, 4,
+        16,
+        4,
         |_frame, mem| {
-            mem.write(0, 7);  // 7*3 = 21
-            mem.write(1, 4);  // +4 = 25
+            mem.write(0, 7); // 7*3 = 21
+            mem.write(1, 4); // +4 = 25
         },
     );
     assert_values_agree("value_multiply", &ours, &theirs);
@@ -2207,11 +2055,9 @@ fn value_multiply() {
 /// Single byte always reading the same address.
 #[test]
 fn value_constant_mem() {
-    let (ours, theirs) = run_value_trace(
-        "0xH0000", "0xH0000",
-        16, 5,
-        |_frame, mem| { mem.write(0, 42); },
-    );
+    let (ours, theirs) = run_value_trace("0xH0000", "0xH0000", 16, 5, |_frame, mem| {
+        mem.write(0, 42);
+    });
     assert_values_agree("value_constant_mem", &ours, &theirs);
 }
 
@@ -2222,14 +2068,10 @@ fn value_constant_mem() {
 /// 32-bit LE value.
 #[test]
 fn value_dword() {
-    let (ours, theirs) = run_value_trace(
-        "0xX0000", "0xX0000",
-        16, 3,
-        |frame, mem| {
-            let v = 100_000u32 + (frame as u32 * 50_000);
-            mem.write_u32_le(0, v);
-        },
-    );
+    let (ours, theirs) = run_value_trace("0xX0000", "0xX0000", 16, 3, |frame, mem| {
+        let v = 100_000u32 + (frame as u32 * 50_000);
+        mem.write_u32_le(0, v);
+    });
     assert_values_agree("value_dword", &ours, &theirs);
 }
 
@@ -2240,11 +2082,9 @@ fn value_dword() {
 /// Value changes each frame — both evaluators should track.
 #[test]
 fn value_changes_each_frame() {
-    let (ours, theirs) = run_value_trace(
-        "0xH0000", "0xH0000",
-        16, 10,
-        |frame, mem| { mem.write(0, frame as u8); },
-    );
+    let (ours, theirs) = run_value_trace("0xH0000", "0xH0000", 16, 10, |frame, mem| {
+        mem.write(0, frame as u8);
+    });
     assert_values_agree("value_changes_each_frame", &ours, &theirs);
 }
 
@@ -2254,7 +2094,8 @@ fn value_add_source_dynamic() {
     let (ours, theirs) = run_value_trace(
         "A:0xH0000_0xH0001",
         "A:0xH0000_M:0xH0001",
-        16, 8,
+        16,
+        8,
         |frame, mem| {
             mem.write(0, (frame as u8) * 10);
             mem.write(1, 255 - (frame as u8) * 10);
@@ -2273,11 +2114,12 @@ fn value_weighted_sum() {
     let (ours, theirs) = run_value_trace(
         "A:0xH0000*10_A:0xH0001*5_0xH0002",
         "A:0xH0000*10_A:0xH0001*5_M:0xH0002",
-        16, 4,
+        16,
+        4,
         |frame, mem| {
             mem.write(0, frame as u8 + 1); // (f+1)*10
-            mem.write(1, 2);                // 2*5=10
-            mem.write(2, 1);                // +1
+            mem.write(1, 2); // 2*5=10
+            mem.write(2, 1); // +1
         },
     );
     assert_values_agree("value_weighted_sum", &ours, &theirs);

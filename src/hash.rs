@@ -47,7 +47,9 @@ mod tests {
     fn hash_length_is_32() {
         let h = hash_gb(b"some rom bytes here");
         assert_eq!(h.len(), 32);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(h
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
     }
 
     #[test]

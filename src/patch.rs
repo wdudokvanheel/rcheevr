@@ -91,7 +91,10 @@ fn convert_leaderboard(def: &LeaderboardDef) -> Result<LoadedLeaderboard, LoadEr
         &def.mem,
         format,
     )
-    .map_err(|e| LoadError::Leaderboard { id: def.id as u32, error: e })?;
+    .map_err(|e| LoadError::Leaderboard {
+        id: def.id as u32,
+        error: e,
+    })?;
     Ok(LoadedLeaderboard { ast })
 }
 
@@ -138,8 +141,8 @@ impl LoadedGame {
         }
 
         // Parse rich presence script.
-        let rich_presence = RichPresence::parse(&data.rich_presence_patch)
-            .map_err(LoadError::RichPresence)?;
+        let rich_presence =
+            RichPresence::parse(&data.rich_presence_patch).map_err(LoadError::RichPresence)?;
 
         Ok(LoadedGame {
             // game_id is not carried inside PatchData; default to 0.
@@ -340,7 +343,10 @@ mod tests {
     #[test]
     fn achievement_bad_mem_is_skipped() {
         let game = LoadedGame::from_patch_json(BAD_ACH_MEM).unwrap();
-        assert!(game.achievements.is_empty(), "bad achievement should be skipped");
+        assert!(
+            game.achievements.is_empty(),
+            "bad achievement should be skipped"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -368,7 +374,10 @@ mod tests {
     #[test]
     fn leaderboard_bad_mem_is_skipped() {
         let game = LoadedGame::from_patch_json(BAD_LB_MEM).unwrap();
-        assert!(game.leaderboards.is_empty(), "bad leaderboard should be skipped");
+        assert!(
+            game.leaderboards.is_empty(),
+            "bad leaderboard should be skipped"
+        );
     }
 
     // -----------------------------------------------------------------------

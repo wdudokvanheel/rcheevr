@@ -53,39 +53,77 @@ fn mock_with_patch(
 ) -> MockTransport {
     let mut mock = MockTransport::new();
     mock.strict = false;
+    let award_ids: Vec<u64> = achievements
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("ID").and_then(serde_json::Value::as_u64))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    mock.expect_json("", &[("r", "login2")], json!({
-        "Success": true,
-        "User": "tester",
-        "Token": "TOKEN",
-        "DisplayName": "tester",
-        "Score": 0,
-        "SoftcoreScore": 0,
-        "Messages": 0,
-        "Permissions": 0
-    }));
+    mock.expect_json(
+        "",
+        &[("r", "login2")],
+        json!({
+            "Success": true,
+            "User": "tester",
+            "Token": "TOKEN",
+            "DisplayName": "tester",
+            "Score": 0,
+            "SoftcoreScore": 0,
+            "Messages": 0,
+            "Permissions": 0
+        }),
+    );
 
-    mock.expect_json("", &[("r", "gameid")], json!({
-        "Success": true,
-        "GameID": 1
-    }));
+    mock.expect_json(
+        "",
+        &[("r", "gameid")],
+        json!({
+            "Success": true,
+            "GameID": 1
+        }),
+    );
 
-    mock.expect_json("", &[("r", "patch")], json!({
-        "Success": true,
-        "Title": "Harness ROM",
-        "ImageIcon": "",
-        "ConsoleID": 4,
-        "RichPresencePatch": rich_presence,
-        "Achievements": achievements,
-        "Leaderboards": leaderboards
-    }));
+    mock.expect_json(
+        "",
+        &[("r", "patch")],
+        json!({
+            "Success": true,
+            "Title": "Harness ROM",
+            "ImageIcon": "",
+            "ConsoleID": 4,
+            "RichPresencePatch": rich_presence,
+            "Achievements": achievements,
+            "Leaderboards": leaderboards
+        }),
+    );
 
-    mock.expect_json("", &[("r", "startsession")], json!({
-        "Success": true,
-        "HardcoreUnlocks": [],
-        "Unlocks": [],
-        "ServerNow": 0
-    }));
+    mock.expect_json(
+        "",
+        &[("r", "startsession")],
+        json!({
+            "Success": true,
+            "HardcoreUnlocks": [],
+            "Unlocks": [],
+            "ServerNow": 0
+        }),
+    );
+
+    for id in award_ids {
+        mock.expect_json(
+            "",
+            &[("r", "awardachievement")],
+            json!({
+                "Success": true,
+                "Score": 0,
+                "SoftcoreScore": 0,
+                "AchievementID": id
+            }),
+        );
+    }
 
     mock
 }
@@ -135,7 +173,7 @@ fn peek_bus(gb: &GameBoy, addr: u32, size: MemSize) -> u32 {
 }
 
 /// Run `n` frames, collecting all events.
-fn run_frames(
+async fn run_frames(
     gb: &mut GameBoy,
     rt: &mut AchievementRuntime<MockTransport>,
     n: usize,
@@ -143,7 +181,7 @@ fn run_frames(
     let mut all = Vec::new();
     for _ in 0..n {
         gb.run_frame();
-        rt.peek_from(|addr, size| peek_bus(gb, addr, size));
+        rt.peek_from(|addr, size| peek_bus(gb, addr, size)).await;
         all.extend(rt.drain_events());
     }
     all
@@ -189,26 +227,27 @@ fn ach(id: u32, title: &str, memaddr: &str, points: u32) -> serde_json::Value {
 // (condition true but target not reached) and fires on frame 5.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn rom_header_hit_count() {
+#[tokio::test]
+async fn rom_header_hit_count() {
     let rom = require_rom!();
 
-    let mock = mock_with_achievements(json!([
-        ach(1001, "ROM Header", "0xH0104=206(5)", 5)
-    ]));
+    let mock = mock_with_achievements(json!([ach(1001, "ROM Header", "0xH0104=206(5)", 5)]));
 
     let mut rt = runtime_with(mock);
-    rt.login_password("tester", "pw").unwrap();
-    rt.load_rom(&rom).unwrap();
+    rt.login_password("tester", "pw").await.unwrap();
+    rt.load_rom(&rom).await.unwrap();
 
     let mut gb = boot_gb(&rom);
 
     // First 4 frames — should not fire.
-    let early = run_frames(&mut gb, &mut rt, 4);
-    assert!(unlocked_ids(&early).is_empty(), "should not fire before frame 5");
+    let early = run_frames(&mut gb, &mut rt, 4).await;
+    assert!(
+        unlocked_ids(&early).is_empty(),
+        "should not fire before frame 5"
+    );
 
     // Frame 5 — fires.
-    let frame5 = run_frames(&mut gb, &mut rt, 1);
+    let frame5 = run_frames(&mut gb, &mut rt, 1).await;
     assert_eq!(unlocked_ids(&frame5), vec![1001]);
 }
 
@@ -220,27 +259,32 @@ fn rom_header_hit_count() {
 // on exactly frame 50.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn hit_count_delays_trigger() {
+#[tokio::test]
+async fn hit_count_delays_trigger() {
     let rom = require_rom!();
 
-    let mock = mock_with_achievements(json!([
-        ach(1002, "Fifty Frames", "0xH0104=206(50)", 10)
-    ]));
+    let mock = mock_with_achievements(json!([ach(1002, "Fifty Frames", "0xH0104=206(50)", 10)]));
 
     let mut rt = runtime_with(mock);
-    rt.login_password("tester", "pw").unwrap();
-    rt.load_rom(&rom).unwrap();
+    rt.login_password("tester", "pw").await.unwrap();
+    rt.load_rom(&rom).await.unwrap();
 
     let mut gb = boot_gb(&rom);
 
     // 49 frames — should not fire yet.
-    let early = run_frames(&mut gb, &mut rt, 49);
-    assert!(unlocked_ids(&early).is_empty(), "should not trigger before frame 50");
+    let early = run_frames(&mut gb, &mut rt, 49).await;
+    assert!(
+        unlocked_ids(&early).is_empty(),
+        "should not trigger before frame 50"
+    );
 
     // Frame 50 — fires.
-    let frame50 = run_frames(&mut gb, &mut rt, 1);
-    assert_eq!(unlocked_ids(&frame50), vec![1002], "should trigger on frame 50");
+    let frame50 = run_frames(&mut gb, &mut rt, 1).await;
+    assert_eq!(
+        unlocked_ids(&frame50),
+        vec![1002],
+        "should trigger on frame 50"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -249,22 +293,23 @@ fn hit_count_delays_trigger() {
 // 0xH0104=0 — the Nintendo logo byte is 0xCE, never 0.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn impossible_condition_never_fires() {
+#[tokio::test]
+async fn impossible_condition_never_fires() {
     let rom = require_rom!();
 
-    let mock = mock_with_achievements(json!([
-        ach(1003, "Impossible", "0xH0104=0", 50)
-    ]));
+    let mock = mock_with_achievements(json!([ach(1003, "Impossible", "0xH0104=0", 50)]));
 
     let mut rt = runtime_with(mock);
-    rt.login_password("tester", "pw").unwrap();
-    rt.load_rom(&rom).unwrap();
+    rt.login_password("tester", "pw").await.unwrap();
+    rt.load_rom(&rom).await.unwrap();
 
     let mut gb = boot_gb(&rom);
-    let events = run_frames(&mut gb, &mut rt, 300);
+    let events = run_frames(&mut gb, &mut rt, 300).await;
 
-    assert!(unlocked_ids(&events).is_empty(), "impossible condition must never fire");
+    assert!(
+        unlocked_ids(&events).is_empty(),
+        "impossible condition must never fire"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -275,20 +320,18 @@ fn impossible_condition_never_fires() {
 // We run 600 frames to give any commercial ROM plenty of time.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn wram_write_detected() {
+#[tokio::test]
+async fn wram_write_detected() {
     let rom = require_rom!();
 
-    let mock = mock_with_achievements(json!([
-        ach(1004, "WRAM Init", "0xHC001>0", 5)
-    ]));
+    let mock = mock_with_achievements(json!([ach(1004, "WRAM Init", "0xHC001>0", 5)]));
 
     let mut rt = runtime_with(mock);
-    rt.login_password("tester", "pw").unwrap();
-    rt.load_rom(&rom).unwrap();
+    rt.login_password("tester", "pw").await.unwrap();
+    rt.load_rom(&rom).await.unwrap();
 
     let mut gb = boot_gb(&rom);
-    let events = run_frames(&mut gb, &mut rt, 600);
+    let events = run_frames(&mut gb, &mut rt, 600).await;
 
     assert_eq!(
         unlocked_ids(&events),
@@ -305,20 +348,18 @@ fn wram_write_detected() {
 // value the condition triggers.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn delta_detects_memory_change() {
+#[tokio::test]
+async fn delta_detects_memory_change() {
     let rom = require_rom!();
 
-    let mock = mock_with_achievements(json!([
-        ach(1005, "Memory Changed", "d0xHC001!=0xHC001", 5)
-    ]));
+    let mock = mock_with_achievements(json!([ach(1005, "Memory Changed", "d0xHC001!=0xHC001", 5)]));
 
     let mut rt = runtime_with(mock);
-    rt.login_password("tester", "pw").unwrap();
-    rt.load_rom(&rom).unwrap();
+    rt.login_password("tester", "pw").await.unwrap();
+    rt.load_rom(&rom).await.unwrap();
 
     let mut gb = boot_gb(&rom);
-    let events = run_frames(&mut gb, &mut rt, 600);
+    let events = run_frames(&mut gb, &mut rt, 600).await;
 
     assert!(
         !unlocked_ids(&events).is_empty(),
@@ -334,36 +375,46 @@ fn delta_detects_memory_change() {
 // target not reached), then trigger when their hit count is met.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn multiple_achievements_staggered() {
+#[tokio::test]
+async fn multiple_achievements_staggered() {
     let rom = require_rom!();
 
     let mock = mock_with_achievements(json!([
-        ach(1006, "Quick",    "0xH0104=206(10)",   5),
-        ach(1007, "Delayed",  "0xH0104=206(60)",  10)
+        ach(1006, "Quick", "0xH0104=206(10)", 5),
+        ach(1007, "Delayed", "0xH0104=206(60)", 10)
     ]));
 
     let mut rt = runtime_with(mock);
-    rt.login_password("tester", "pw").unwrap();
-    rt.load_rom(&rom).unwrap();
+    rt.login_password("tester", "pw").await.unwrap();
+    rt.load_rom(&rom).await.unwrap();
 
     let mut gb = boot_gb(&rom);
 
     // First 9 frames — neither should fire.
-    let early = run_frames(&mut gb, &mut rt, 9);
-    assert!(unlocked_ids(&early).is_empty(), "neither should fire before frame 10");
+    let early = run_frames(&mut gb, &mut rt, 9).await;
+    assert!(
+        unlocked_ids(&early).is_empty(),
+        "neither should fire before frame 10"
+    );
 
     // Frame 10 — quick fires.
-    let frame10 = run_frames(&mut gb, &mut rt, 1);
+    let frame10 = run_frames(&mut gb, &mut rt, 1).await;
     assert_eq!(unlocked_ids(&frame10), vec![1006]);
 
     // Frames 11..59 — delayed should not fire yet.
-    let mid = run_frames(&mut gb, &mut rt, 49);
-    assert!(unlocked_ids(&mid).is_empty(), "delayed should not fire before frame 60");
+    let mid = run_frames(&mut gb, &mut rt, 49).await;
+    assert!(
+        unlocked_ids(&mid).is_empty(),
+        "delayed should not fire before frame 60"
+    );
 
     // Frame 60 — delayed fires.
-    let frame60 = run_frames(&mut gb, &mut rt, 1);
-    assert_eq!(unlocked_ids(&frame60), vec![1007], "delayed should trigger on frame 60");
+    let frame60 = run_frames(&mut gb, &mut rt, 1).await;
+    assert_eq!(
+        unlocked_ids(&frame60),
+        vec![1007],
+        "delayed should trigger on frame 60"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -373,26 +424,24 @@ fn multiple_achievements_staggered() {
 // remains true. Uses WRAM condition that triggers once during init.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn no_re_award() {
+#[tokio::test]
+async fn no_re_award() {
     let rom = require_rom!();
 
-    let mock = mock_with_achievements(json!([
-        ach(1008, "Once Only", "0xHC001>0", 5)
-    ]));
+    let mock = mock_with_achievements(json!([ach(1008, "Once Only", "0xHC001>0", 5)]));
 
     let mut rt = runtime_with(mock);
-    rt.login_password("tester", "pw").unwrap();
-    rt.load_rom(&rom).unwrap();
+    rt.login_password("tester", "pw").await.unwrap();
+    rt.load_rom(&rom).await.unwrap();
 
     let mut gb = boot_gb(&rom);
 
     // Run enough frames for the achievement to trigger (WRAM written by ~frame 100).
-    let first = run_frames(&mut gb, &mut rt, 600);
+    let first = run_frames(&mut gb, &mut rt, 600).await;
     assert_eq!(unlocked_ids(&first), vec![1008]);
 
     // 200 more frames — must not re-award.
-    let rest = run_frames(&mut gb, &mut rt, 200);
+    let rest = run_frames(&mut gb, &mut rt, 200).await;
     assert!(
         unlocked_ids(&rest).is_empty(),
         "achievement must not re-award after initial trigger"
@@ -406,19 +455,19 @@ fn no_re_award() {
 // rendered string should be non-empty.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn rich_presence_renders() {
+#[tokio::test]
+async fn rich_presence_renders() {
     let rom = require_rom!();
 
     let rp = "Display:\nPlaying Test ROM";
     let mock = mock_with_patch(json!([]), json!([]), rp);
 
     let mut rt = runtime_with(mock);
-    rt.login_password("tester", "pw").unwrap();
-    rt.load_rom(&rom).unwrap();
+    rt.login_password("tester", "pw").await.unwrap();
+    rt.load_rom(&rom).await.unwrap();
 
     let mut gb = boot_gb(&rom);
-    let _ = run_frames(&mut gb, &mut rt, 10);
+    let _ = run_frames(&mut gb, &mut rt, 10).await;
 
     assert_eq!(rt.rich_presence(), "Playing Test ROM");
 }
@@ -429,8 +478,8 @@ fn rich_presence_renders() {
 // hash_gb on the same ROM data always returns the same 32-char hex string.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn rom_hash_deterministic() {
+#[tokio::test]
+async fn rom_hash_deterministic() {
     let rom = require_rom!();
 
     let h1 = rveevr::hash::hash_gb(&rom);

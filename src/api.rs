@@ -445,8 +445,7 @@ mod tests {
             "Unlocks": [{"ID": 1}, {"ID": 2}, {"ID": 3}]
         }"#;
 
-        let resp: RaResponse<startsession::StartSessionData> =
-            serde_json::from_str(json).unwrap();
+        let resp: RaResponse<startsession::StartSessionData> = serde_json::from_str(json).unwrap();
         assert!(resp.success);
         let data = resp.data.unwrap();
         assert_eq!(data.hardcore_unlocks.len(), 2);

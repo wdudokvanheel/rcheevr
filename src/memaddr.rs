@@ -24,19 +24,19 @@ pub enum MemSize {
     LowNibble,
     HighNibble,
     Byte,
-    Word,               // 16-bit little-endian
-    ThreeBytes,         // 24-bit little-endian
-    DWord,              // 32-bit little-endian
-    BigEndianWord,      // 16-bit big-endian
+    Word,                // 16-bit little-endian
+    ThreeBytes,          // 24-bit little-endian
+    DWord,               // 32-bit little-endian
+    BigEndianWord,       // 16-bit big-endian
     BigEndianThreeBytes, // 24-bit big-endian
-    BigEndianDWord,     // 32-bit big-endian
+    BigEndianDWord,      // 32-bit big-endian
     BitCount,
-    Float,              // 32-bit IEEE 754 little-endian
-    FloatBigEndian,     // 32-bit IEEE 754 big-endian
-    MbfFloat,           // 32-bit Microsoft Binary Format little-endian
+    Float,                // 32-bit IEEE 754 little-endian
+    FloatBigEndian,       // 32-bit IEEE 754 big-endian
+    MbfFloat,             // 32-bit Microsoft Binary Format little-endian
     MbfFloatLittleEndian, // alias kept for symmetry with rcheevos naming
-    Double32,           // 32-bit double (little-endian)
-    Double32BigEndian,  // 32-bit double (big-endian)
+    Double32,             // 32-bit double (little-endian)
+    Double32BigEndian,    // 32-bit double (big-endian)
 }
 
 /// Which snapshot of memory this operand reads.
@@ -103,7 +103,10 @@ impl std::error::Error for ParseError {}
 pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
     let b = s.as_bytes();
     if b.is_empty() {
-        return Err(ParseError { pos: 0, msg: "empty input" });
+        return Err(ParseError {
+            pos: 0,
+            msg: "empty input",
+        });
     }
 
     let mut pos = 0;
@@ -154,33 +157,93 @@ pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
         })?;
 
         let size = match size_byte {
-            b' ' => { pos += 1; MemSize::Word }                  // 0x  → 16-bit LE
-            b'H' | b'h' => { pos += 1; MemSize::Byte }           // 8-bit
-            b'X' | b'x' => { pos += 1; MemSize::DWord }          // 32-bit LE
-            b'W' | b'w' => { pos += 1; MemSize::ThreeBytes }     // 24-bit LE
-            b'L' | b'l' => { pos += 1; MemSize::LowNibble }      // bits 0-3
-            b'U' | b'u' => { pos += 1; MemSize::HighNibble }     // bits 4-7
-            b'M' | b'm' => { pos += 1; MemSize::Bit0 }
-            b'N' | b'n' => { pos += 1; MemSize::Bit1 }
-            b'O' | b'o' => { pos += 1; MemSize::Bit2 }
-            b'P' | b'p' => { pos += 1; MemSize::Bit3 }
-            b'Q' | b'q' => { pos += 1; MemSize::Bit4 }
-            b'R' | b'r' => { pos += 1; MemSize::Bit5 }
-            b'S' | b's' => { pos += 1; MemSize::Bit6 }
-            b'T' | b't' => { pos += 1; MemSize::Bit7 }
-            b'K' | b'k' => { pos += 1; MemSize::BitCount }       // popcount
-            b'I' | b'i' => { pos += 1; MemSize::BigEndianWord }  // 16-bit BE
-            b'J' | b'j' => { pos += 1; MemSize::BigEndianThreeBytes } // 24-bit BE
-            b'G' | b'g' => { pos += 1; MemSize::BigEndianDWord } // 32-bit BE
+            b' ' => {
+                pos += 1;
+                MemSize::Word
+            } // 0x  → 16-bit LE
+            b'H' | b'h' => {
+                pos += 1;
+                MemSize::Byte
+            } // 8-bit
+            b'X' | b'x' => {
+                pos += 1;
+                MemSize::DWord
+            } // 32-bit LE
+            b'W' | b'w' => {
+                pos += 1;
+                MemSize::ThreeBytes
+            } // 24-bit LE
+            b'L' | b'l' => {
+                pos += 1;
+                MemSize::LowNibble
+            } // bits 0-3
+            b'U' | b'u' => {
+                pos += 1;
+                MemSize::HighNibble
+            } // bits 4-7
+            b'M' | b'm' => {
+                pos += 1;
+                MemSize::Bit0
+            }
+            b'N' | b'n' => {
+                pos += 1;
+                MemSize::Bit1
+            }
+            b'O' | b'o' => {
+                pos += 1;
+                MemSize::Bit2
+            }
+            b'P' | b'p' => {
+                pos += 1;
+                MemSize::Bit3
+            }
+            b'Q' | b'q' => {
+                pos += 1;
+                MemSize::Bit4
+            }
+            b'R' | b'r' => {
+                pos += 1;
+                MemSize::Bit5
+            }
+            b'S' | b's' => {
+                pos += 1;
+                MemSize::Bit6
+            }
+            b'T' | b't' => {
+                pos += 1;
+                MemSize::Bit7
+            }
+            b'K' | b'k' => {
+                pos += 1;
+                MemSize::BitCount
+            } // popcount
+            b'I' | b'i' => {
+                pos += 1;
+                MemSize::BigEndianWord
+            } // 16-bit BE
+            b'J' | b'j' => {
+                pos += 1;
+                MemSize::BigEndianThreeBytes
+            } // 24-bit BE
+            b'G' | b'g' => {
+                pos += 1;
+                MemSize::BigEndianDWord
+            } // 32-bit BE
             // Legacy: hex digit after 0x with no size prefix → 16-bit Word.
             // Don't advance pos; the digit is part of the address.
             b'0' if b.get(pos + 1).copied() == Some(b'x') => {
                 // 0x0x... is a double-prefix typo — reject like rcheevos does.
-                return Err(ParseError { pos, msg: "double 0x prefix" });
+                return Err(ParseError {
+                    pos,
+                    msg: "double 0x prefix",
+                });
             }
-            b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' => { MemSize::Word }
+            b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' => MemSize::Word,
             _ => {
-                return Err(ParseError { pos, msg: "unknown size prefix letter after 0x" });
+                return Err(ParseError {
+                    pos,
+                    msg: "unknown size prefix letter after 0x",
+                });
             }
         };
 
@@ -190,17 +253,32 @@ pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
             pos += 1;
         }
         if pos == addr_start {
-            return Err(ParseError { pos, msg: "expected hex address digits" });
+            return Err(ParseError {
+                pos,
+                msg: "expected hex address digits",
+            });
         }
         let hex_len = pos - addr_start;
         if hex_len > 8 {
-            return Err(ParseError { pos: addr_start, msg: "address too long (max 8 hex digits)" });
+            return Err(ParseError {
+                pos: addr_start,
+                msg: "address too long (max 8 hex digits)",
+            });
         }
         let addr_str = &s[addr_start..pos];
-        let address = u32::from_str_radix(addr_str, 16)
-            .map_err(|_| ParseError { pos: addr_start, msg: "invalid hex address" })?;
+        let address = u32::from_str_radix(addr_str, 16).map_err(|_| ParseError {
+            pos: addr_start,
+            msg: "invalid hex address",
+        })?;
 
-        return Ok((Operand::Memory { kind, size, address }, pos));
+        return Ok((
+            Operand::Memory {
+                kind,
+                size,
+                address,
+            },
+            pos,
+        ));
     }
 
     // Case B: `f` prefix — float-type memory reference or float immediate
@@ -219,32 +297,74 @@ pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
                 // Here `f` followed by `F`: 32-bit IEEE float LE
                 pos += 1;
                 let address = parse_hex_address(s, b, &mut pos)?;
-                return Ok((Operand::Memory { kind, size: MemSize::Float, address }, pos));
+                return Ok((
+                    Operand::Memory {
+                        kind,
+                        size: MemSize::Float,
+                        address,
+                    },
+                    pos,
+                ));
             }
             b'B' | b'b' => {
                 pos += 1;
                 let address = parse_hex_address(s, b, &mut pos)?;
-                return Ok((Operand::Memory { kind, size: MemSize::FloatBigEndian, address }, pos));
+                return Ok((
+                    Operand::Memory {
+                        kind,
+                        size: MemSize::FloatBigEndian,
+                        address,
+                    },
+                    pos,
+                ));
             }
             b'H' | b'h' => {
                 pos += 1;
                 let address = parse_hex_address(s, b, &mut pos)?;
-                return Ok((Operand::Memory { kind, size: MemSize::MbfFloat, address }, pos));
+                return Ok((
+                    Operand::Memory {
+                        kind,
+                        size: MemSize::MbfFloat,
+                        address,
+                    },
+                    pos,
+                ));
             }
             b'M' | b'm' => {
                 pos += 1;
                 let address = parse_hex_address(s, b, &mut pos)?;
-                return Ok((Operand::Memory { kind, size: MemSize::MbfFloatLittleEndian, address }, pos));
+                return Ok((
+                    Operand::Memory {
+                        kind,
+                        size: MemSize::MbfFloatLittleEndian,
+                        address,
+                    },
+                    pos,
+                ));
             }
             b'I' | b'i' => {
                 pos += 1;
                 let address = parse_hex_address(s, b, &mut pos)?;
-                return Ok((Operand::Memory { kind, size: MemSize::Double32, address }, pos));
+                return Ok((
+                    Operand::Memory {
+                        kind,
+                        size: MemSize::Double32,
+                        address,
+                    },
+                    pos,
+                ));
             }
             b'L' | b'l' => {
                 pos += 1;
                 let address = parse_hex_address(s, b, &mut pos)?;
-                return Ok((Operand::Memory { kind, size: MemSize::Double32BigEndian, address }, pos));
+                return Ok((
+                    Operand::Memory {
+                        kind,
+                        size: MemSize::Double32BigEndian,
+                        address,
+                    },
+                    pos,
+                ));
             }
             // Digits or '-' / '+' / '.' → float immediate literal: f1.5, f-3.0
             b'0'..=b'9' | b'-' | b'+' | b'.' => {
@@ -266,7 +386,10 @@ pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
                     }
                 }
                 if pos == lit_start {
-                    return Err(ParseError { pos: lit_start, msg: "expected float literal digits" });
+                    return Err(ParseError {
+                        pos: lit_start,
+                        msg: "expected float literal digits",
+                    });
                 }
                 let float_str = &s[lit_start..pos];
                 let value: f32 = float_str.parse().map_err(|_| ParseError {
@@ -276,7 +399,10 @@ pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
                 return Ok((Operand::ConstFloat(value), pos));
             }
             _ => {
-                return Err(ParseError { pos, msg: "unknown float size prefix" });
+                return Err(ParseError {
+                    pos,
+                    msg: "unknown float size prefix",
+                });
             }
         }
     }
@@ -289,10 +415,15 @@ pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
             pos += 1;
         }
         if pos == hex_start {
-            return Err(ParseError { pos, msg: "expected hex digits after 'h'" });
+            return Err(ParseError {
+                pos,
+                msg: "expected hex digits after 'h'",
+            });
         }
-        let value = u32::from_str_radix(&s[hex_start..pos], 16)
-            .map_err(|_| ParseError { pos: hex_start, msg: "invalid hex immediate" })?;
+        let value = u32::from_str_radix(&s[hex_start..pos], 16).map_err(|_| ParseError {
+            pos: hex_start,
+            msg: "invalid hex immediate",
+        })?;
         return Ok((Operand::ConstInt(value), pos));
     }
 
@@ -309,7 +440,10 @@ pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
             pos += 1;
         }
         if pos == digit_start {
-            return Err(ParseError { pos, msg: "expected decimal digits after 'v'" });
+            return Err(ParseError {
+                pos,
+                msg: "expected decimal digits after 'v'",
+            });
         }
         let dec_str = &s[dec_start..pos];
         // rcheevos treats the value as unsigned; a negative prefix wraps around in u32
@@ -354,7 +488,10 @@ pub fn parse_operand(s: &str) -> Result<(Operand, usize), ParseError> {
         return Ok((Operand::ConstInt(value), pos));
     }
 
-    Err(ParseError { pos, msg: "unrecognised operand" })
+    Err(ParseError {
+        pos,
+        msg: "unrecognised operand",
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -378,7 +515,19 @@ fn looks_like_mem_start(b: &[u8], offset: usize) -> bool {
             // Could be fF, fB, fH, fM, fI, fL
             matches!(
                 b.get(offset + 1).copied(),
-                Some(b'F' | b'f' | b'B' | b'b' | b'H' | b'h' | b'M' | b'm' | b'I' | b'i' | b'L' | b'l')
+                Some(
+                    b'F' | b'f'
+                        | b'B'
+                        | b'b'
+                        | b'H'
+                        | b'h'
+                        | b'M'
+                        | b'm'
+                        | b'I'
+                        | b'i'
+                        | b'L'
+                        | b'l'
+                )
             )
         }
         // Also allow stacked modifier prefixes: b0x..., bd0x..., etc.
@@ -394,13 +543,21 @@ fn parse_hex_address(s: &str, b: &[u8], pos: &mut usize) -> Result<u32, ParseErr
         *pos += 1;
     }
     if *pos == start {
-        return Err(ParseError { pos: start, msg: "expected hex address digits" });
+        return Err(ParseError {
+            pos: start,
+            msg: "expected hex address digits",
+        });
     }
     if *pos - start > 8 {
-        return Err(ParseError { pos: start, msg: "address too long (max 8 hex digits)" });
+        return Err(ParseError {
+            pos: start,
+            msg: "address too long (max 8 hex digits)",
+        });
     }
-    u32::from_str_radix(&s[start..*pos], 16)
-        .map_err(|_| ParseError { pos: start, msg: "invalid hex address" })
+    u32::from_str_radix(&s[start..*pos], 16).map_err(|_| ParseError {
+        pos: start,
+        msg: "invalid hex address",
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +582,11 @@ mod tests {
     fn mem(s: &str) -> (OperandKind, MemSize, u32, usize) {
         let (op, consumed) = ok(s);
         match op {
-            Operand::Memory { kind, size, address } => (kind, size, address, consumed),
+            Operand::Memory {
+                kind,
+                size,
+                address,
+            } => (kind, size, address, consumed),
             other => panic!("expected Memory for {:?}, got {:?}", s, other),
         }
     }
@@ -761,11 +922,25 @@ mod tests {
         // Simulates "lhs_op_rhs" where both sides are operands.
         let s = "0xH1234>0xH5678";
         let (op1, c1) = ok(s);
-        assert_eq!(op1, Operand::Memory { kind: OperandKind::Address, size: MemSize::Byte, address: 0x1234 });
+        assert_eq!(
+            op1,
+            Operand::Memory {
+                kind: OperandKind::Address,
+                size: MemSize::Byte,
+                address: 0x1234
+            }
+        );
         assert_eq!(c1, 7);
         // Skip the '>' operator character
         let (op2, c2) = ok(&s[c1 + 1..]);
-        assert_eq!(op2, Operand::Memory { kind: OperandKind::Address, size: MemSize::Byte, address: 0x5678 });
+        assert_eq!(
+            op2,
+            Operand::Memory {
+                kind: OperandKind::Address,
+                size: MemSize::Byte,
+                address: 0x5678
+            }
+        );
         assert_eq!(c2, 7);
     }
 
@@ -776,7 +951,14 @@ mod tests {
         assert_eq!(op1, Operand::ConstInt(1234));
         assert_eq!(c1, 4);
         let (op2, _) = ok(&s[c1 + 1..]);
-        assert_eq!(op2, Operand::Memory { kind: OperandKind::Address, size: MemSize::Byte, address: 0x0010 });
+        assert_eq!(
+            op2,
+            Operand::Memory {
+                kind: OperandKind::Address,
+                size: MemSize::Byte,
+                address: 0x0010
+            }
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -846,7 +1028,10 @@ mod tests {
 
     #[test]
     fn parse_error_display() {
-        let e = ParseError { pos: 3, msg: "test error" };
+        let e = ParseError {
+            pos: 3,
+            msg: "test error",
+        };
         let s = format!("{}", e);
         assert!(s.contains("3"));
         assert!(s.contains("test error"));
