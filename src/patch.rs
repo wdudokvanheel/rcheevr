@@ -25,6 +25,7 @@ pub struct LoadedGame {
     pub achievements: Vec<LoadedAchievement>,
     pub leaderboards: Vec<LoadedLeaderboard>,
     pub rich_presence: RichPresence,
+    pub warnings: Vec<LoadWarning>,
 }
 
 /// A single parsed achievement ready for the evaluator.
@@ -46,6 +47,23 @@ pub struct LoadedAchievement {
 #[derive(Debug, Clone)]
 pub struct LoadedLeaderboard {
     pub ast: Leaderboard,
+}
+
+/// Non-fatal issues encountered while loading a patch.
+#[derive(Debug, Clone)]
+pub enum LoadWarning {
+    /// An achievement was skipped because its condition string could not parse.
+    AchievementSkipped {
+        id: u32,
+        title: String,
+        error: ConditionParseError,
+    },
+    /// A leaderboard was skipped because one of its condition strings could not parse.
+    LeaderboardSkipped {
+        id: u32,
+        title: String,
+        error: ConditionParseError,
+    },
 }
 
 /// Error returned when converting a patch payload into a `LoadedGame`.
@@ -111,6 +129,8 @@ impl LoadedGame {
     /// `from_patch_json` handles it by also accepting a bare `PatchData` without
     /// an outer game-id field.
     pub fn from_patch(data: &PatchData) -> Result<Self, LoadError> {
+        let mut warnings = Vec::new();
+
         // Parse achievements. Skip any that fail to parse (e.g. demoted
         // achievements with unsupported flags) rather than failing the load.
         let mut achievements = Vec::with_capacity(data.achievements.len());
@@ -118,10 +138,14 @@ impl LoadedGame {
             match convert_achievement(def) {
                 Ok(a) => achievements.push(a),
                 Err(e) => {
-                    eprintln!(
-                        "[rveevr] skipping achievement {} ({:?}): {:?}",
-                        def.id, def.title, e
-                    );
+                    let LoadError::Achievement { id, error } = e else {
+                        unreachable!("convert_achievement only returns achievement errors");
+                    };
+                    warnings.push(LoadWarning::AchievementSkipped {
+                        id,
+                        title: def.title.clone(),
+                        error,
+                    });
                 }
             }
         }
@@ -132,10 +156,14 @@ impl LoadedGame {
             match convert_leaderboard(def) {
                 Ok(lb) => leaderboards.push(lb),
                 Err(e) => {
-                    eprintln!(
-                        "[rveevr] skipping leaderboard {} ({:?}): {:?}",
-                        def.id, def.title, e
-                    );
+                    let LoadError::Leaderboard { id, error } = e else {
+                        unreachable!("convert_leaderboard only returns leaderboard errors");
+                    };
+                    warnings.push(LoadWarning::LeaderboardSkipped {
+                        id,
+                        title: def.title.clone(),
+                        error,
+                    });
                 }
             }
         }
@@ -154,6 +182,7 @@ impl LoadedGame {
             achievements,
             leaderboards,
             rich_presence,
+            warnings,
         })
     }
 
@@ -347,6 +376,10 @@ mod tests {
             game.achievements.is_empty(),
             "bad achievement should be skipped"
         );
+        assert!(matches!(
+            game.warnings.as_slice(),
+            [LoadWarning::AchievementSkipped { id: 99, .. }]
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -378,6 +411,10 @@ mod tests {
             game.leaderboards.is_empty(),
             "bad leaderboard should be skipped"
         );
+        assert!(matches!(
+            game.warnings.as_slice(),
+            [LoadWarning::LeaderboardSkipped { id: 42, .. }]
+        ));
     }
 
     // -----------------------------------------------------------------------

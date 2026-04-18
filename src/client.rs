@@ -685,6 +685,10 @@ mod tests {
         json!({ "Success": true, "Score": 510, "SoftcoreScore": 100, "AchievementID": 1 })
     }
 
+    fn award_error_resp() -> serde_json::Value {
+        json!({ "Success": false, "Error": "temporary award failure" })
+    }
+
     fn submit_lb_resp() -> serde_json::Value {
         json!({
             "Success": true,
@@ -899,6 +903,64 @@ mod tests {
         assert_eq!(award_calls, 1, "expected exactly 1 awardachievement call");
     }
 
+    #[tokio::test]
+    async fn failed_award_is_retried_without_local_unlock() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        queue_load_rom(&mut t, 42, patch_json_one_ach());
+        t.expect_json(
+            "",
+            &[("r", "awardachievement"), ("a", "1")],
+            award_error_resp(),
+        );
+        t.expect_json("", &[("r", "awardachievement"), ("a", "1")], award_resp());
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
+
+        rt.peek_from(|_, _| 0).await;
+        assert!(rt.drain_events().next().is_none());
+
+        rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 })
+            .await;
+        let first_attempt: Vec<_> = rt.drain_events().collect();
+        assert!(
+            first_attempt
+                .iter()
+                .any(|e| matches!(e, AchievementEvent::ServerError(_))),
+            "expected a server error on failed award"
+        );
+        assert!(
+            !first_attempt
+                .iter()
+                .any(|e| matches!(e, AchievementEvent::Unlocked { .. })),
+            "local unlock must wait for server confirmation"
+        );
+
+        rt.peek_from(|addr, _| if addr == 0xc0 { 1 } else { 0 })
+            .await;
+        let retry_events: Vec<_> = rt.drain_events().collect();
+        assert!(
+            retry_events
+                .iter()
+                .any(|e| matches!(e, AchievementEvent::Unlocked { id: 1, .. })),
+            "retry should emit unlock after server success"
+        );
+
+        let award_calls = rt
+            .http
+            .calls
+            .iter()
+            .filter(|c| {
+                c.form
+                    .iter()
+                    .any(|(k, v)| k == "r" && v == "awardachievement")
+            })
+            .count();
+        assert_eq!(award_calls, 2, "expected failed award plus retry");
+    }
+
     // -----------------------------------------------------------------------
     // Test 9: leaderboard started then submitted across two frames.
     // -----------------------------------------------------------------------
@@ -1034,6 +1096,24 @@ mod tests {
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
         let err = rt.load_rom(b"rom").await.unwrap_err();
         assert!(matches!(err, RuntimeError::NotLoggedIn));
+    }
+
+    #[tokio::test]
+    async fn load_rom_propagates_startsession_error() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        t.expect_json("", &[("r", "gameid")], gameid_resp(42));
+        t.expect_json("", &[("r", "patch")], patch_json_one_ach());
+        t.expect_json(
+            "",
+            &[("r", "startsession")],
+            json!({ "Success": false, "Error": "session rejected" }),
+        );
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.login_password("testuser", "pass").await.unwrap();
+        let err = rt.load_rom(b"rom").await.unwrap_err();
+        assert!(matches!(err, RuntimeError::Api(msg) if msg == "session rejected"));
     }
 
     // -----------------------------------------------------------------------

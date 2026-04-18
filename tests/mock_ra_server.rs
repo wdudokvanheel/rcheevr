@@ -34,33 +34,26 @@ struct MockServerState {
 struct MockRaServer {
     addr: SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    runtime: Option<tokio::runtime::Runtime>,
+    handle: tokio::task::JoinHandle<()>,
     state: Arc<Mutex<MockServerState>>,
 }
 
 impl MockRaServer {
-    fn start() -> Self {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .build()
-            .unwrap();
-
+    async fn start() -> Self {
         let state = Arc::new(Mutex::new(MockServerState::default()));
         let state_clone = state.clone();
 
-        let (addr_tx, addr_rx) = std::sync::mpsc::channel();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-        runtime.spawn(async move {
-            let app = Router::new()
-                .route("/dorequest.php", post(handler))
-                .with_state(state_clone);
+        let app = Router::new()
+            .route("/dorequest.php", post(handler))
+            .with_state(state_clone);
 
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            addr_tx.send(addr).unwrap();
-
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
                     let _ = shutdown_rx.await;
@@ -69,12 +62,10 @@ impl MockRaServer {
                 .unwrap();
         });
 
-        let addr = addr_rx.recv().unwrap();
-
         Self {
             addr,
             shutdown: Some(shutdown_tx),
-            runtime: Some(runtime),
+            handle,
             state,
         }
     }
@@ -83,11 +74,11 @@ impl MockRaServer {
         format!("http://{}/dorequest.php", self.addr)
     }
 
-    fn stop(mut self) {
+    async fn stop(mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
-        drop(self.runtime.take());
+        let _ = self.handle.await;
     }
 
     fn awarded_ids(&self) -> Vec<u32> {
@@ -227,7 +218,7 @@ fn make_runtime(url: String) -> AchievementRuntime<ReqwestTransport> {
 
 #[tokio::test]
 async fn login_then_load_rom_then_peek_flow() {
-    let server = MockRaServer::start();
+    let server = MockRaServer::start().await;
     let url = server.url();
 
     let mut rt = make_runtime(url);
@@ -288,7 +279,7 @@ async fn login_then_load_rom_then_peek_flow() {
         "should not re-unlock on frame 2"
     );
 
-    server.stop();
+    server.stop().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +288,7 @@ async fn login_then_load_rom_then_peek_flow() {
 
 #[tokio::test]
 async fn login_failure_propagates() {
-    let server = MockRaServer::start();
+    let server = MockRaServer::start().await;
     let url = server.url();
 
     let mut rt = make_runtime(url);
@@ -313,7 +304,7 @@ async fn login_failure_propagates() {
         err
     );
 
-    server.stop();
+    server.stop().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +313,7 @@ async fn login_failure_propagates() {
 
 #[tokio::test]
 async fn unknown_game_returns_error() {
-    let server = MockRaServer::start();
+    let server = MockRaServer::start().await;
     let url = server.url();
 
     let mut rt = make_runtime(url);
@@ -344,7 +335,7 @@ async fn unknown_game_returns_error() {
         err
     );
 
-    server.stop();
+    server.stop().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -353,7 +344,7 @@ async fn unknown_game_returns_error() {
 
 #[tokio::test]
 async fn ping_sent_after_enough_frames() {
-    let server = MockRaServer::start();
+    let server = MockRaServer::start().await;
     let url = server.url();
 
     let mut rt = make_runtime(url);
@@ -381,5 +372,5 @@ async fn ping_sent_after_enough_frames() {
         "expected at least one ping call after 121 frames, got 0"
     );
 
-    server.stop();
+    server.stop().await;
 }
