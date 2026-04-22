@@ -1,4 +1,4 @@
-//! ROM integration harness for rveevr.
+//! ROM integration harness for rcheevr.
 //!
 //! Boots a real Game Boy ROM in the emulator, wires up `AchievementRuntime`
 //! with a `MockTransport` serving crafted achievement conditions, and verifies
@@ -14,10 +14,10 @@
 //! Tests are skipped (pass with a log message) when `TEST_ROM_GB` is unset.
 
 use gameboy_emulator::gameboy::{detect_device_model, GameBoy};
-use rveevr::client::AchievementRuntime;
-use rveevr::events::AchievementEvent;
-use rveevr::http::MockTransport;
-use rveevr::memaddr::MemSize;
+use rcheevr::client::AchievementRuntime;
+use rcheevr::events::AchievementEvent;
+use rcheevr::http::MockTransport;
+use rcheevr::memaddr::MemSize;
 use serde_json::json;
 
 // ---------------------------------------------------------------------------
@@ -144,7 +144,7 @@ fn boot_gb(rom: &[u8]) -> GameBoy {
     gb
 }
 
-/// Peek closure that wires the emulator bus into rveevr's address space.
+/// Peek closure that wires the emulator bus into rcheevr's address space.
 /// Identical to the one used in portacore-desktop / portacore-wasm.
 fn peek_bus(gb: &GameBoy, addr: u32, size: MemSize) -> u32 {
     let bytes: u32 = match size {
@@ -482,8 +482,8 @@ async fn rich_presence_renders() {
 async fn rom_hash_deterministic() {
     let rom = require_rom!();
 
-    let h1 = rveevr::hash::hash_gb(&rom);
-    let h2 = rveevr::hash::hash_gb(&rom);
+    let h1 = rcheevr::hash::hash_gb(&rom);
+    let h2 = rcheevr::hash::hash_gb(&rom);
 
     assert_eq!(h1, h2);
     assert_eq!(h1.len(), 32, "MD5 hex string should be 32 chars");

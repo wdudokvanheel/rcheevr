@@ -307,7 +307,7 @@ impl<H: HttpTransport> AchievementRuntime<H> {
                 ..
             } = w
             {
-                eprintln!("[rveevr] WARNING: RA pseudo-achievement filtered: {title} — {description}");
+                eprintln!("[rcheevr] WARNING: RA pseudo-achievement filtered: {title} — {description}");
                 self.events.push(AchievementEvent::ServerError(format!(
                     "RA warning: {title} — {description}"
                 )));

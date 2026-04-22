@@ -1,4 +1,4 @@
-//! Layer-2 differential tests: rveevr's evaluator vs rcheevos as oracle.
+//! Layer-2 differential tests: rcheevr's evaluator vs rcheevos as oracle.
 //!
 //! Gated behind `--features oracle` because the oracle crate needs a C
 //! toolchain to build. When the feature is off, the whole file compiles to
@@ -7,11 +7,11 @@
 
 #![cfg(feature = "oracle")]
 
-use rveevr::condition::Achievement;
-use rveevr::evaluator::{eval_achievement, AchievementState, ConditionState, CondsetState};
-use rveevr::leaderboard::eval_value;
-use rveevr::memaddr::MemSize;
-use rveevr_oracle::{ffi, Trigger, Value};
+use rcheevr::condition::Achievement;
+use rcheevr::evaluator::{eval_achievement, AchievementState, ConditionState, CondsetState};
+use rcheevr::leaderboard::eval_value;
+use rcheevr::memaddr::MemSize;
+use rcheevr_oracle::{ffi, Trigger, Value};
 
 /// A tiny flat memory buffer the harness feeds to both evaluators.
 struct Mem(Vec<u8>);
@@ -52,7 +52,7 @@ impl Mem {
     }
 }
 
-/// Translate rveevr's MemSize back to a byte count for a size that the
+/// Translate rcheevr's MemSize back to a byte count for a size that the
 /// MockMem supports. Only the sizes the evaluator actually calls here
 /// need to be covered.
 fn size_to_bytes(size: MemSize) -> u32 {
@@ -1866,7 +1866,7 @@ fn float_resetif() {
 }
 
 // ===========================================================================
-// VALUE differential tests: rveevr's eval_value vs rcheevos' rc_evaluate_value
+// VALUE differential tests: rcheevr's eval_value vs rcheevos' rc_evaluate_value
 // ===========================================================================
 //
 // rcheevos' rc_parse_value expects condition-format strings when the second
@@ -1874,7 +1874,7 @@ fn float_resetif() {
 // the terminal condition must use M: (Measured). For single-operand values
 // without a flag prefix, it uses the legacy parser.
 //
-// rveevr's parser accepts M: as ConditionFlag::Measured and treats it as a
+// rcheevr's parser accepts M: as ConditionFlag::Measured and treats it as a
 // terminal row in eval_value, so both sides agree.
 
 /// Run both value evaluators through the same frame sequence.
@@ -1889,7 +1889,7 @@ fn run_value_trace<F>(
 where
     F: FnMut(usize, &mut Mem),
 {
-    let ach = Achievement::parse(memaddr_ours).expect("rveevr parse");
+    let ach = Achievement::parse(memaddr_ours).expect("rcheevr parse");
     let mut cs = CondsetState {
         cond_states: vec![ConditionState::default(); ach.core.conditions.len()],
         ..Default::default()
@@ -1922,7 +1922,7 @@ fn assert_values_agree(tag: &str, ours: &[i64], theirs: &[i32]) {
     for (i, (o, t)) in ours.iter().zip(theirs.iter()).enumerate() {
         assert_eq!(
             *o, *t as i64,
-            "{tag}: value mismatch on frame {i} — rveevr={o} rcheevos={t}"
+            "{tag}: value mismatch on frame {i} — rcheevr={o} rcheevos={t}"
         );
     }
 }
@@ -1934,7 +1934,7 @@ fn assert_values_agree(tag: &str, ours: &[i64], theirs: &[i32]) {
 /// Single byte operand: VALUE = mem[0].
 #[test]
 fn value_single_byte() {
-    // Legacy format for rcheevos (no flag prefix), condition format for rveevr.
+    // Legacy format for rcheevos (no flag prefix), condition format for rcheevr.
     let (ours, theirs) = run_value_trace("0xH0000", "0xH0000", 16, 4, |frame, mem| {
         mem.write(0, (frame as u8 + 1) * 10);
     });

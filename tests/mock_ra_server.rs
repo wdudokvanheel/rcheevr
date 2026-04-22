@@ -13,8 +13,8 @@ use axum::extract::{Form, State};
 use axum::routing::post;
 use axum::{Json, Router};
 
-use rveevr::client::AchievementRuntime;
-use rveevr::http::ReqwestTransport;
+use rcheevr::client::AchievementRuntime;
+use rcheevr::http::ReqwestTransport;
 
 // ---------------------------------------------------------------------------
 // Mock server state
@@ -247,7 +247,7 @@ async fn login_then_load_rom_then_peek_flow() {
     let unlocked_ids: Vec<u32> = events
         .iter()
         .filter_map(|e| {
-            if let rveevr::events::AchievementEvent::Unlocked { id, .. } = e {
+            if let rcheevr::events::AchievementEvent::Unlocked { id, .. } = e {
                 Some(*id)
             } else {
                 None
@@ -273,7 +273,7 @@ async fn login_then_load_rom_then_peek_flow() {
     assert!(
         !events2
             .iter()
-            .any(|e| matches!(e, rveevr::events::AchievementEvent::Unlocked { .. })),
+            .any(|e| matches!(e, rcheevr::events::AchievementEvent::Unlocked { .. })),
         "should not re-unlock on frame 2"
     );
 
@@ -297,7 +297,7 @@ async fn login_failure_propagates() {
         .expect_err("expected login failure");
 
     assert!(
-        matches!(err, rveevr::client::RuntimeError::Api(_)),
+        matches!(err, rcheevr::client::RuntimeError::Api(_)),
         "expected RuntimeError::Api, got {err:?}",
     );
 
@@ -327,7 +327,7 @@ async fn unknown_game_returns_error() {
         .expect_err("expected load_rom to fail for unknown game");
 
     assert!(
-        matches!(err, rveevr::client::RuntimeError::Api(_)),
+        matches!(err, rcheevr::client::RuntimeError::Api(_)),
         "expected RuntimeError::Api for unknown game, got {err:?}",
     );
 

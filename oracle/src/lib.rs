@@ -1,7 +1,7 @@
 //! Dev-only FFI wrapper around rcheevos used as a differential oracle.
 //!
 //! Never shipped in production. Gated behind the `oracle` feature on the
-//! `rveevr` crate. This crate is a separate workspace member so cargo can
+//! `rcheevr` crate. This crate is a separate workspace member so cargo can
 //! skip compiling it (and the C sources) for normal builds.
 
 #![allow(non_camel_case_types)]

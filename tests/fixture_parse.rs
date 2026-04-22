@@ -1,13 +1,13 @@
 //! Parse-compatibility tests against real RetroAchievements patch data.
 //!
 //! Feeds every achievement memaddr and leaderboard mem string from captured
-//! fixture files through rveevr's parsers. No oracle needed — this tests
+//! fixture files through rcheevr's parsers. No oracle needed — this tests
 //! parser coverage against production achievement data.
 //!
 //! Fixture files live in `tests/fixtures/*.json` (RA patch endpoint responses).
 
-use rveevr::condition::Achievement;
-use rveevr::leaderboard::Leaderboard;
+use rcheevr::condition::Achievement;
+use rcheevr::leaderboard::Leaderboard;
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------

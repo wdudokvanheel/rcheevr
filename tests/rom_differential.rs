@@ -1,4 +1,4 @@
-//! ROM differential tests: rveevr vs rcheevos on a real Game Boy ROM.
+//! ROM differential tests: rcheevr vs rcheevos on a real Game Boy ROM.
 //!
 //! Boots a real ROM, feeds the same `bus.peek` memory to both evaluators
 //! each frame, and asserts they trigger on the same frame.
@@ -14,11 +14,11 @@
 #![cfg(feature = "oracle")]
 
 use gameboy_emulator::gameboy::{detect_device_model, Button, GameBoy};
-use rveevr::condition::Achievement;
-use rveevr::evaluator::{eval_achievement, AchievementState, ConditionState, CondsetState};
-use rveevr::leaderboard::eval_value;
-use rveevr::memaddr::MemSize;
-use rveevr_oracle::{ffi, Trigger, Value};
+use rcheevr::condition::Achievement;
+use rcheevr::evaluator::{eval_achievement, AchievementState, ConditionState, CondsetState};
+use rcheevr::leaderboard::eval_value;
+use rcheevr::memaddr::MemSize;
+use rcheevr_oracle::{ffi, Trigger, Value};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ fn boot_gb(rom: &[u8]) -> GameBoy {
     gb
 }
 
-/// Translate rveevr MemSize to byte count for the rcheevos peek callback.
+/// Translate rcheevr MemSize to byte count for the rcheevos peek callback.
 fn size_to_bytes(size: MemSize) -> u32 {
     match size {
         MemSize::Byte
@@ -80,16 +80,16 @@ fn peek_raw(gb: &GameBoy, addr: u32, num_bytes: u32) -> u32 {
     val
 }
 
-/// Read from the GB bus using rveevr's MemSize (for rveevr peek).
+/// Read from the GB bus using rcheevr's MemSize (for rcheevr peek).
 fn peek_sized(gb: &GameBoy, addr: u32, size: MemSize) -> u32 {
     peek_raw(gb, addr, size_to_bytes(size))
 }
 
 /// Run both evaluators over `frames` frames on the same ROM.
-/// Returns `(rveevr_triggered, rcheevos_triggered)` per frame.
+/// Returns `(rcheevr_triggered, rcheevos_triggered)` per frame.
 fn run_rom_trace(gb: &mut GameBoy, memaddr: &str, frames: usize) -> (Vec<bool>, Vec<bool>) {
     let ach = Achievement::parse(memaddr)
-        .unwrap_or_else(|e| panic!("rveevr parse failed for {memaddr:?}: {e:?}"));
+        .unwrap_or_else(|e| panic!("rcheevr parse failed for {memaddr:?}: {e:?}"));
     let mut ours_state = AchievementState::for_achievement(&ach);
     let mut theirs = Trigger::parse(memaddr)
         .unwrap_or_else(|e| panic!("rcheevos parse failed for {memaddr:?}: {e:?}"));
@@ -117,7 +117,7 @@ fn assert_agree(tag: &str, ours: &[bool], theirs: &[bool]) {
     let theirs_first = theirs.iter().position(|b| *b);
     assert_eq!(
         ours_first, theirs_first,
-        "{tag}: first-trigger frame mismatch — rveevr={ours_first:?} rcheevos={theirs_first:?}"
+        "{tag}: first-trigger frame mismatch — rcheevr={ours_first:?} rcheevos={theirs_first:?}"
     );
 }
 
@@ -127,7 +127,7 @@ fn assert_agree(tag: &str, ours: &[bool], theirs: &[bool]) {
 //
 // NOTE: rcheevos starts triggers in a WAITING state that prevents firing
 // when conditions are trivially true from frame 0 (anti-auto-trigger).
-// rveevr implements the same state machine, so the cases below cover both
+// rcheevr implements the same state machine, so the cases below cover both
 // always-true and false-then-true conditions.
 // ---------------------------------------------------------------------------
 
@@ -434,7 +434,7 @@ fn diff_pokemon_red_all_achievements() {
         let ours = match Achievement::parse(&a.memaddr) {
             Ok(ach) => ach,
             Err(e) => {
-                parse_failures.push(format!("[{}] {} rveevr: {:?}", a.id, a.title, e));
+                parse_failures.push(format!("[{}] {} rcheevr: {:?}", a.id, a.title, e));
                 continue;
             }
         };
@@ -480,7 +480,7 @@ fn diff_pokemon_red_all_achievements() {
 
             if ours_triggered != theirs_triggered {
                 disagreements.push(format!(
-                    "frame {}: [{}] {} — rveevr={} rcheevos={} (state={})",
+                    "frame {}: [{}] {} — rcheevr={} rcheevos={} (state={})",
                     frame, def.id, def.title, ours_triggered, theirs_triggered, oracle_state
                 ));
             }
@@ -527,7 +527,7 @@ fn diff_pokemon_red_all_achievements() {
 
 /// Run leaderboard VALUE expressions from Pokémon Red through both evaluators.
 ///
-/// For each leaderboard, parse the VAL section and run rveevr's eval_value
+/// For each leaderboard, parse the VAL section and run rcheevr's eval_value
 /// vs rcheevos' rc_evaluate_value for 1000 frames.
 #[test]
 fn diff_pokemon_red_leaderboard_values() {
@@ -541,7 +541,7 @@ fn diff_pokemon_red_leaderboard_values() {
     // For each leaderboard, extract the VAL section.
     struct LbPair<'a> {
         def: &'a LeaderboardDef,
-        val_condset: rveevr::condition::Condset,
+        val_condset: rcheevr::condition::Condset,
         val_state: CondsetState,
         oracle: Value,
     }
@@ -564,12 +564,12 @@ fn diff_pokemon_red_leaderboard_values() {
             }
         };
 
-        // Parse through rveevr.
+        // Parse through rcheevr.
         let ach = match Achievement::parse(val_str) {
             Ok(a) => a,
             Err(e) => {
                 parse_failures.push(format!(
-                    "[{}] {} rveevr: {:?}\n  val: {}",
+                    "[{}] {} rcheevr: {:?}\n  val: {}",
                     lb.id, lb.title, e, val_str
                 ));
                 continue;
@@ -630,7 +630,7 @@ fn diff_pokemon_red_leaderboard_values() {
 
             if ours_val != theirs_val {
                 disagreements.push(format!(
-                    "frame {}: LB[{}] {} — rveevr={} rcheevos={}",
+                    "frame {}: LB[{}] {} — rcheevr={} rcheevos={}",
                     frame, pair.def.id, pair.def.title, ours_val, theirs_val
                 ));
             }
@@ -688,7 +688,7 @@ fn diff_pokemon_red_gameplay() {
 
     for a in &core {
         let ours = Achievement::parse(&a.memaddr)
-            .unwrap_or_else(|e| panic!("[{}] {} rveevr parse: {:?}", a.id, a.title, e));
+            .unwrap_or_else(|e| panic!("[{}] {} rcheevr parse: {:?}", a.id, a.title, e));
         let theirs = Trigger::parse(&a.memaddr)
             .unwrap_or_else(|e| panic!("[{}] {} rcheevos parse: {:?}", a.id, a.title, e));
         let state = AchievementState::for_achievement(&ours);
@@ -698,7 +698,7 @@ fn diff_pokemon_red_gameplay() {
     // --- Parse all leaderboard VAL sections ---
     struct LbPair2<'a> {
         def: &'a LeaderboardDef,
-        val_condset: rveevr::condition::Condset,
+        val_condset: rcheevr::condition::Condset,
         val_state: CondsetState,
         oracle: Value,
     }
@@ -715,7 +715,7 @@ fn diff_pokemon_red_gameplay() {
             None => continue,
         };
         let ach = Achievement::parse(val_str)
-            .unwrap_or_else(|e| panic!("LB[{}] {} rveevr: {:?}", lb.id, lb.title, e));
+            .unwrap_or_else(|e| panic!("LB[{}] {} rcheevr: {:?}", lb.id, lb.title, e));
         let cs = CondsetState {
             cond_states: vec![ConditionState::default(); ach.core.conditions.len()],
             ..Default::default()
@@ -806,7 +806,7 @@ fn diff_pokemon_red_gameplay() {
 
             if ours_triggered != theirs_triggered {
                 ach_disagreements.push(format!(
-                    "frame {}: [{}] {} — rveevr={} rcheevos={} (state={})",
+                    "frame {}: [{}] {} — rcheevr={} rcheevos={} (state={})",
                     frame, def.id, def.title, ours_triggered, theirs_triggered, oracle_state
                 ));
             }
@@ -821,7 +821,7 @@ fn diff_pokemon_red_gameplay() {
 
             if ours_val != theirs_val {
                 val_disagreements.push(format!(
-                    "frame {}: LB[{}] {} — rveevr={} rcheevos={}",
+                    "frame {}: LB[{}] {} — rcheevr={} rcheevos={}",
                     frame, pair.def.id, pair.def.title, ours_val, theirs_val
                 ));
             }

@@ -1,6 +1,6 @@
-# rveevr Testing Methodology & Compliance
+# rcheevr Testing Methodology & Compliance
 
-This document describes how **rveevr** — a pure-Rust RetroAchievements evaluator — is tested, how compliance with the reference C implementation (rcheevos) is verified, and what known weaknesses and potential problems remain.
+This document describes how **rcheevr** — a pure-Rust RetroAchievements evaluator — is tested, how compliance with the reference C implementation (rcheevos) is verified, and what known weaknesses and potential problems remain.
 
 ## Table of Contents
 
@@ -24,7 +24,7 @@ This document describes how **rveevr** — a pure-Rust RetroAchievements evaluat
 
 ## Goals & Constraints
 
-rveevr reimplements the rcheevos evaluator in Rust with two hard constraints:
+rcheevr reimplements the rcheevos evaluator in Rust with two hard constraints:
 
 1. **Zero FFI in production** — the crate must compile to native desktop and WebAssembly targets from a single codebase. C dependencies are only used during testing.
 2. **Zero production-account risk** — no automated test ever contacts the real RetroAchievements servers or uses real credentials. All network interactions are mocked.
@@ -76,16 +76,16 @@ The **oracle** crate (`oracle/`) compiles rcheevos from C source and exposes it 
 **Location:** `tests/differential.rs` (~800 LOC, 50+ test cases)
 **Requires:** `--features oracle` (C toolchain)
 
-This is the core compliance mechanism. Each test constructs a synthetic memory trace and feeds it frame-by-frame to both rveevr and rcheevos, asserting they produce identical triggered/not-triggered results on every frame.
+This is the core compliance mechanism. Each test constructs a synthetic memory trace and feeds it frame-by-frame to both rcheevr and rcheevos, asserting they produce identical triggered/not-triggered results on every frame.
 
 **Test harness:**
 
 ```
 For each frame 0..N:
     step(frame, &mut memory)           // User-defined memory mutation
-    rveevr_result  = rust_eval(memory)  // Our evaluator
+    rcheevr_result  = rust_eval(memory)  // Our evaluator
     rcheevos_result = c_eval(memory)    // Reference via FFI
-    assert_eq!(rveevr_result, rcheevos_result)
+    assert_eq!(rcheevr_result, rcheevos_result)
 ```
 
 **Coverage spans all 14 condition flags and their interactions:**
@@ -158,7 +158,7 @@ An axum-based HTTP server spawned on an ephemeral port simulates the RA web API.
 **Location:** `tests/rom_harness.rs` (~443 LOC)
 **Requires:** `$TEST_ROM_GB` environment variable
 
-Runs the rveevr evaluator against a real Game Boy ROM with a mock transport backend. This tests the full vertical slice: ROM hashing, achievement parsing from JSON, per-frame evaluation with real emulator memory, and event generation.
+Runs the rcheevr evaluator against a real Game Boy ROM with a mock transport backend. This tests the full vertical slice: ROM hashing, achievement parsing from JSON, per-frame evaluation with real emulator memory, and event generation.
 
 **Key tests:**
 - **ROM header constants:** Known byte at address 0x0104 (Nintendo logo) triggers achievement
@@ -178,7 +178,7 @@ Runs the rveevr evaluator against a real Game Boy ROM with a mock transport back
 **Location:** `tests/rom_differential.rs` (~876 LOC)
 **Requires:** `--features oracle` + `$TEST_ROM_GB`
 
-This is the most comprehensive test. It boots a real Pokemon Red ROM, plays through 60,000 frames (~17 minutes of gameplay) with scripted inputs, and evaluates **every achievement and leaderboard** through both rveevr and rcheevos on every frame.
+This is the most comprehensive test. It boots a real Pokemon Red ROM, plays through 60,000 frames (~17 minutes of gameplay) with scripted inputs, and evaluates **every achievement and leaderboard** through both rcheevr and rcheevos on every frame.
 
 **Setup:**
 - Boots ROM and skips the intro sequence deterministically
@@ -190,7 +190,7 @@ This is the most comprehensive test. It boots a real Pokemon Red ROM, plays thro
 - 3 leaderboard VALUE expressions per frame = **180,000 value evaluations**
 - **Total: 5,640,000 evaluations compared bit-for-bit**
 
-**Result:** Zero disagreements. Every triggered state and every leaderboard value matches between rveevr and rcheevos across the entire run.
+**Result:** Zero disagreements. Every triggered state and every leaderboard value matches between rcheevr and rcheevos across the entire run.
 
 **What this catches:** Subtle accumulator drift, state machine divergence under sustained evaluation, and edge cases that only emerge from the interaction of many achievements evaluating against the same evolving memory state. This is where we caught the legacy value format bug — leaderboard speedrun timers with multipliers (`0xhda45*1_0xhda44*60_...`) were producing values offset by exactly the multiplier amount, which was only visible after thousands of frames of accumulation.
 
@@ -256,7 +256,7 @@ When loading game data from the RA API, unparseable achievements and leaderboard
 
 **Affected:** Conditions like `d0xH0001 > 0xH0002` where the delta operand is on a different address than the RHS.
 
-**Behavior:** rveevr tracks delta/prior state per-condition, not per-address. When the RHS references a different address with a delta modifier, rveevr uses the LHS condition's state for both sides. rcheevos tracks modified memrefs globally per-address, so it would use the correct per-address delta for the RHS.
+**Behavior:** rcheevr tracks delta/prior state per-condition, not per-address. When the RHS references a different address with a delta modifier, rcheevr uses the LHS condition's state for both sides. rcheevos tracks modified memrefs globally per-address, so it would use the correct per-address delta for the RHS.
 
 **Impact:** Low. The vast majority of delta comparisons compare an address against itself (`d0xH0000 != 0xH0000` — "did this byte change?"). Cross-address delta comparisons are rare in production achievements. The differential tests have not found a disagreement caused by this, but it is a theoretical divergence.
 
@@ -276,7 +276,7 @@ When loading game data from the RA API, unparseable achievements and leaderboard
 
 **Affected:** Conditions that use indirect addressing (`AddAddress`) combined with delta operands.
 
-**Behavior:** When evaluating delta values for conditions modified by AddAddress, rveevr peeks the base address rather than the indirected address. rcheevos handles this through its modified memref system, which tracks deltas for the final resolved address.
+**Behavior:** When evaluating delta values for conditions modified by AddAddress, rcheevr peeks the base address rather than the indirected address. rcheevos handles this through its modified memref system, which tracks deltas for the final resolved address.
 
 **Impact:** Very low. AddAddress + delta is extremely rare in production achievements. The combination requires reading a previous frame's value at an address that is itself determined by another memory read, which is an unusual construction.
 
@@ -298,7 +298,7 @@ When loading game data from the RA API, unparseable achievements and leaderboard
 
 **Behavior:** The differential tests verify that both evaluators agree. They do not specifically test that achievements *don't* trigger when they shouldn't, beyond what naturally falls out of the frame-by-frame comparison.
 
-**Impact:** Low. The frame-by-frame comparison inherently catches false positives — if rveevr triggers on a frame where rcheevos doesn't, the test fails. However, there are no dedicated tests that construct memory states specifically designed to be "almost but not quite" satisfying.
+**Impact:** Low. The frame-by-frame comparison inherently catches false positives — if rcheevr triggers on a frame where rcheevos doesn't, the test fails. However, there are no dedicated tests that construct memory states specifically designed to be "almost but not quite" satisfying.
 
 **Mitigation path:** Add targeted differential tests with near-miss memory patterns for each flag type.
 
@@ -308,7 +308,7 @@ When loading game data from the RA API, unparseable achievements and leaderboard
 
 ### 1. rcheevos Version Drift
 
-**Risk:** The vendored rcheevos submodule represents a snapshot in time. As the upstream rcheevos project adds new features or changes semantics, rveevr may fall behind.
+**Risk:** The vendored rcheevos submodule represents a snapshot in time. As the upstream rcheevos project adds new features or changes semantics, rcheevr may fall behind.
 
 **Example scenarios:**
 - A new condition flag is added (like the `G:` flag found in unofficial achievements, which we currently skip).
@@ -319,11 +319,11 @@ When loading game data from the RA API, unparseable achievements and leaderboard
 
 ### 2. Unofficial Achievements with Unknown Features
 
-**Risk:** Unofficial achievements (flags != 3) may use experimental or undocumented features that rveevr cannot parse.
+**Risk:** Unofficial achievements (flags != 3) may use experimental or undocumented features that rcheevr cannot parse.
 
 **Current behavior:** Unparseable achievements are skipped with a log warning. This is safe but means users won't see those achievements.
 
-**Example:** Achievement 108362 (Pokemon Red, unofficial) uses a `G:` flag that rveevr does not recognize. This was encountered during real API testing.
+**Example:** Achievement 108362 (Pokemon Red, unofficial) uses a `G:` flag that rcheevr does not recognize. This was encountered during real API testing.
 
 **Impact:** Limited to unofficial achievement sets. Core (official) achievements go through a review process that generally keeps them within the documented feature set.
 
@@ -331,13 +331,13 @@ When loading game data from the RA API, unparseable achievements and leaderboard
 
 **Risk:** Rich presence scripts can contain complex conditional display logic with nested lookups and format chains. The parser handles the standard Format/Lookup/Display structure, but the RA ecosystem allows custom extensions and conditional display lines that may have undocumented behaviors.
 
-**Current coverage:** RP parsing is tested against real Tetris and Pokemon Red scripts. The FormatType parser accepts both `=` and `:` separators (a real-world variation discovered during testing). However, there is no differential testing for rich presence output — only rveevr's parser is tested, not compared frame-by-frame against rcheevos' RP evaluator.
+**Current coverage:** RP parsing is tested against real Tetris and Pokemon Red scripts. The FormatType parser accepts both `=` and `:` separators (a real-world variation discovered during testing). However, there is no differential testing for rich presence output — only rcheevr's parser is tested, not compared frame-by-frame against rcheevos' RP evaluator.
 
 **Mitigation path:** Extend the oracle to expose `rc_richpresence_t` evaluation and add differential RP tests.
 
 ### 4. Float Comparison Edge Cases
 
-**Risk:** IEEE 754 floating point comparison has well-known edge cases (NaN, negative zero, denormals). rveevr uses epsilon-tolerant comparison matching rcheevos, but float-based achievements are uncommon and may not be well-represented in the differential test suite.
+**Risk:** IEEE 754 floating point comparison has well-known edge cases (NaN, negative zero, denormals). rcheevr uses epsilon-tolerant comparison matching rcheevos, but float-based achievements are uncommon and may not be well-represented in the differential test suite.
 
 **Impact:** Low for Game Boy (no float-based achievements). Higher for platforms like PS1/N64 where float memory reads are more common.
 
@@ -353,16 +353,16 @@ When loading game data from the RA API, unparseable achievements and leaderboard
 
 **Risk:** The evaluator reads memory through a `peek(address, num_bytes) -> u32` callback provided by the emulator. If the emulator's memory map doesn't match what rcheevos expects for a given console, achievements will evaluate against wrong data.
 
-**This is outside rveevr's scope** — it depends on the emulator's bus implementation. But it is a real integration risk. For example:
+**This is outside rcheevr's scope** — it depends on the emulator's bus implementation. But it is a real integration risk. For example:
 - Memory bank switching (GBC) must present the correct bank at the expected address range.
 - Memory-mapped I/O registers may need to return specific values.
 - Echo RAM regions should mirror their source.
 
-**Current coverage:** The ROM differential test validates that the Game Boy emulator's `bus.peek()` produces the same values when called from rveevr as when called from rcheevos through the oracle's peek thunk. This is implicitly tested because both evaluators receive the same peek function and must agree on results.
+**Current coverage:** The ROM differential test validates that the Game Boy emulator's `bus.peek()` produces the same values when called from rcheevr as when called from rcheevos through the oracle's peek thunk. This is implicitly tested because both evaluators receive the same peek function and must agree on results.
 
 ### 7. Hash Algorithm Divergence
 
-**Risk:** If rveevr's ROM hashing doesn't match rcheevos' per-console hashing rules, the wrong game ID will be returned from the RA API, and achievements for a different game (or no game) will be loaded.
+**Risk:** If rcheevr's ROM hashing doesn't match rcheevos' per-console hashing rules, the wrong game ID will be returned from the RA API, and achievements for a different game (or no game) will be loaded.
 
 **Current implementation:** GB hashing is a straightforward MD5 of the full ROM. Other consoles have more complex rules (header stripping, interleaving, etc.). Each new console integration needs its hash algorithm verified against rcheevos.
 
@@ -380,7 +380,7 @@ When loading game data from the RA API, unparseable achievements and leaderboard
 
 4. **Multiple console targets** — ROM differential tests currently cover Game Boy only. GBA, SNES, and other platforms are not covered.
 
-5. **Concurrent session handling** — the RA API allows only one active session per user. rveevr does not test behavior when another client starts a session while we're active.
+5. **Concurrent session handling** — the RA API allows only one active session per user. rcheevr does not test behavior when another client starts a session while we're active.
 
 6. **Hardcore mode server-side enforcement** — hardcore mode is a client-side flag sent with API calls. We test that the flag is sent correctly, but server-side validation of hardcore submissions is not testable offline.
 
@@ -403,6 +403,6 @@ TEST_ROM_GB=/path/to/pokemon_red.gb cargo test diff_pokemon_red_gameplay \
     --features oracle -- --nocapture
 
 # CI configuration
-cargo test -p rveevr                    # Always: layers 1, 3, 4, 5
-cargo test -p rveevr --features oracle  # Linux runners with C toolchain
+cargo test -p rcheevr                    # Always: layers 1, 3, 4, 5
+cargo test -p rcheevr --features oracle  # Linux runners with C toolchain
 ```
