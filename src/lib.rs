@@ -15,3 +15,5 @@ pub mod richpresence;
 pub use client::AchievementRuntime;
 pub use events::AchievementEvent;
 pub use http::HttpTransport;
+#[cfg(feature = "http-fetch")]
+pub use http::FetchTransport;

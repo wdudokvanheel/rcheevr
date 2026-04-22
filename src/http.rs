@@ -200,6 +200,118 @@ impl HttpTransport for MockTransport {
 }
 
 // ---------------------------------------------------------------------------
+// FetchTransport (wasm — browser fetch API)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "http-fetch")]
+pub struct FetchTransport {
+    extra_headers: Vec<(String, String)>,
+}
+
+#[cfg(feature = "http-fetch")]
+impl FetchTransport {
+    pub fn new() -> Self {
+        Self {
+            extra_headers: Vec::new(),
+        }
+    }
+
+    /// Add an extra header sent with every request (e.g. `Authorization`).
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra_headers.push((name.into(), value.into()));
+        self
+    }
+}
+
+#[cfg(feature = "http-fetch")]
+impl Default for FetchTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "http-fetch")]
+impl HttpTransport for FetchTransport {
+    fn post_form<'a>(
+        &'a mut self,
+        url: &'a str,
+        form: &'a [(&'a str, &'a str)],
+    ) -> TransportFuture<'a> {
+        Box::pin(async move {
+            use wasm_bindgen::JsCast;
+
+            let body = form
+                .iter()
+                .map(|(k, v)| format!("{}={}", form_encode(k), form_encode(v)))
+                .collect::<Vec<_>>()
+                .join("&");
+
+            let opts = web_sys::RequestInit::new();
+            opts.set_method("POST");
+            opts.set_body(&wasm_bindgen::JsValue::from_str(&body));
+
+            let headers = web_sys::Headers::new()
+                .map_err(|e| TransportError::Network(format!("{e:?}")))?;
+            headers
+                .set("Content-Type", "application/x-www-form-urlencoded")
+                .map_err(|e| TransportError::Network(format!("{e:?}")))?;
+            for (name, value) in &self.extra_headers {
+                headers
+                    .set(name, value)
+                    .map_err(|e| TransportError::Network(format!("{e:?}")))?;
+            }
+            opts.set_headers(&headers);
+
+            let request = web_sys::Request::new_with_str_and_init(url, &opts)
+                .map_err(|e| TransportError::Network(format!("{e:?}")))?;
+
+            let window = web_sys::window()
+                .ok_or_else(|| TransportError::Network("no global window".into()))?;
+            let resp_val = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request))
+                .await
+                .map_err(|e| TransportError::Network(format!("{e:?}")))?;
+            let resp: web_sys::Response = resp_val
+                .dyn_into()
+                .map_err(|e| TransportError::Network(format!("{e:?}")))?;
+
+            if !resp.ok() {
+                return Err(TransportError::Status(resp.status()));
+            }
+
+            let buf = resp
+                .array_buffer()
+                .map_err(|e| TransportError::Network(format!("{e:?}")))?;
+            let buf = wasm_bindgen_futures::JsFuture::from(buf)
+                .await
+                .map_err(|e| TransportError::Network(format!("{e:?}")))?;
+            let bytes = js_sys::Uint8Array::new(&buf);
+            Ok(bytes.to_vec())
+        })
+    }
+}
+
+/// Minimal `application/x-www-form-urlencoded` encoder (no external deps).
+#[cfg(feature = "http-fetch")]
+fn form_encode(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0xf) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // ReqwestTransport
 // ---------------------------------------------------------------------------
 

@@ -64,6 +64,13 @@ pub enum LoadWarning {
         title: String,
         error: ConditionParseError,
     },
+    /// A pseudo-achievement injected by RA as a warning (e.g. "Warning: Unknown
+    /// Emulator") was filtered out of the achievement list.
+    WarningPseudoAchievement {
+        id: u32,
+        title: String,
+        description: String,
+    },
 }
 
 /// Error returned when converting a patch payload into a `LoadedGame`.
@@ -133,8 +140,18 @@ impl LoadedGame {
 
         // Parse achievements. Skip any that fail to parse (e.g. demoted
         // achievements with unsupported flags) rather than failing the load.
+        // Also filter out RA warning pseudo-achievements (title starts with
+        // "Warning") which RA injects when the emulator is unrecognised.
         let mut achievements = Vec::with_capacity(data.achievements.len());
         for def in &data.achievements {
+            if def.title.starts_with("Warning") {
+                warnings.push(LoadWarning::WarningPseudoAchievement {
+                    id: def.id as u32,
+                    title: def.title.clone(),
+                    description: def.description.clone(),
+                });
+                continue;
+            }
             match convert_achievement(def) {
                 Ok(a) => achievements.push(a),
                 Err(e) => {

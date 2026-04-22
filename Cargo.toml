@@ -13,7 +13,7 @@ publish = false
 [features]
 default = []
 http-reqwest = ["dep:reqwest"]
-http-fetch = []
+http-fetch = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
 # Differential tests against rcheevos. Requires a C toolchain. Never shipped.
 oracle = ["dep:rveevr-oracle"]
 
@@ -23,6 +23,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rveevr-oracle = { path = "oracle", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["Headers", "Request", "RequestInit", "Response", "Window"] }
 
 [dev-dependencies]
 axum = "0.7"

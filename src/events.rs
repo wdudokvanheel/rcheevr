@@ -1,5 +1,6 @@
 //! Public event enum emitted by `AchievementRuntime`.
 
+#[derive(Debug)]
 pub enum AchievementEvent {
     Unlocked {
         id: u32,

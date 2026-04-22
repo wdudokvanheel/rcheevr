@@ -15,6 +15,10 @@ use crate::memaddr::MemSize;
 use crate::patch::{LoadError, LoadedGame};
 use serde::de::DeserializeOwned;
 
+/// Emulator integration identifier sent with `startsession`.
+/// Using a known RA-approved emulator name for testing purposes.
+const INTEGRATION_ID: &str = "RALibretro";
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -145,6 +149,15 @@ impl<H: HttpTransport> AchievementRuntime<H> {
 
     pub fn loaded_game(&self) -> Option<&LoadedGame> {
         self.game.as_ref().map(|g| &g.loaded)
+    }
+
+    /// Returns `true` if the achievement at this index has already been
+    /// unlocked (either previously or during this session).
+    pub fn achievement_unlocked(&self, index: usize) -> bool {
+        self.game
+            .as_ref()
+            .and_then(|g| g.unlocked.get(index).copied())
+            .unwrap_or(false)
     }
 
     pub fn rich_presence(&self) -> &str {
@@ -286,6 +299,21 @@ impl<H: HttpTransport> AchievementRuntime<H> {
         let mut loaded = LoadedGame::from_patch_json(patch_json).map_err(RuntimeError::Load)?;
         loaded.game_id = game_id as u32;
 
+        // Emit warnings for RA pseudo-achievements (e.g. "hardcore mode disabled").
+        for w in &loaded.warnings {
+            if let crate::patch::LoadWarning::WarningPseudoAchievement {
+                title,
+                description,
+                ..
+            } = w
+            {
+                eprintln!("[rveevr] WARNING: RA pseudo-achievement filtered: {title} — {description}");
+                self.events.push(AchievementEvent::ServerError(format!(
+                    "RA warning: {title} — {description}"
+                )));
+            }
+        }
+
         // Step 3: start session.
         let hardcore_val = if self.hardcore { "1" } else { "0" };
         let session_form = [
@@ -294,6 +322,7 @@ impl<H: HttpTransport> AchievementRuntime<H> {
             ("t", token.as_str()),
             ("g", game_id_str.as_str()),
             ("h", hardcore_val),
+            ("l", INTEGRATION_ID),
         ];
         let session_bytes = self.http.post_form(&url, &session_form).await?;
 
@@ -1190,5 +1219,113 @@ mod tests {
 
         // "Display:\nPlaying" → should render "Playing".
         assert_eq!(rt.rich_presence(), "Playing");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 16: startsession sends the emulator integration ID (`l` param).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn startsession_sends_integration_id() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        t.expect_json("", &[("r", "gameid")], gameid_resp(42));
+        t.expect_json("", &[("r", "patch")], patch_json_one_ach());
+        t.expect_json(
+            "",
+            &[("r", "startsession"), ("l", INTEGRATION_ID)],
+            startsession_resp(),
+        );
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
+
+        rt.http
+            .assert_called("", &[("r", "startsession"), ("l", INTEGRATION_ID)]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 17: Warning pseudo-achievements are filtered out of loaded game
+    //          and a ServerError event is emitted for each.
+    // -----------------------------------------------------------------------
+
+    fn patch_json_with_warning() -> serde_json::Value {
+        json!({
+            "Success": true,
+            "Title": "Test Game",
+            "ImageIcon": "/Images/001.png",
+            "ConsoleID": 4,
+            "RichPresencePatch": "Display:\nPlaying",
+            "Achievements": [
+                {
+                    "ID": 1,
+                    "Title": "First",
+                    "Description": "Get it",
+                    "Points": 10,
+                    "MemAddr": "0xH00c0=1",
+                    "Flags": 3,
+                    "Author": "dev",
+                    "BadgeName": "00001"
+                },
+                {
+                    "ID": 0,
+                    "Title": "Warning: Unknown Emulator",
+                    "Description": "Hardcore unlocks cannot be earned using this emulator.",
+                    "Points": 0,
+                    "MemAddr": "0=1",
+                    "Flags": 3,
+                    "Author": "",
+                    "BadgeName": "00000"
+                }
+            ],
+            "Leaderboards": []
+        })
+    }
+
+    #[tokio::test]
+    async fn warning_pseudo_achievements_filtered_and_event_emitted() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        queue_load_rom(&mut t, 42, patch_json_with_warning());
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.login_password("testuser", "pass").await.unwrap();
+        let game = rt.load_rom(b"rom").await.unwrap();
+
+        // Only the real achievement should survive.
+        assert_eq!(game.achievements.len(), 1);
+        assert_eq!(game.achievements[0].title, "First");
+
+        // A ServerError event should have been emitted for the warning.
+        let events: Vec<_> = rt.drain_events().collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AchievementEvent::ServerError(msg) if msg.contains("Warning: Unknown Emulator")
+            )),
+            "expected ServerError with warning text, got {events:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 18: Warning pseudo-achievements in patch.rs are captured as
+    //          WarningPseudoAchievement LoadWarning.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn patch_filters_warning_pseudo_achievements() {
+        let json = patch_json_with_warning().to_string();
+        let game = crate::patch::LoadedGame::from_patch_json(&json).unwrap();
+
+        assert_eq!(game.achievements.len(), 1, "warning should be filtered");
+        assert!(
+            game.warnings.iter().any(|w| matches!(
+                w,
+                crate::patch::LoadWarning::WarningPseudoAchievement { title, .. }
+                    if title.starts_with("Warning")
+            )),
+            "expected WarningPseudoAchievement in warnings"
+        );
     }
 }
