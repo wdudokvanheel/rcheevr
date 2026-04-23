@@ -223,8 +223,16 @@ impl LoadedGame {
             return Self::from_patch(&wrapper.patch_data);
         }
 
-        // Attempt 2: RaResponse<PatchData> with flattened fields.
+        // Attempt 2: RaResponse<PatchData> with flattened fields. Bail early
+        // if RA reported `Success: false` — `PatchData` defaults would
+        // otherwise silently swallow an error envelope as an empty game.
         if let Ok(resp) = serde_json::from_str::<RaResponse<PatchData>>(json) {
+            if !resp.success {
+                return Err(LoadError::Json(
+                    resp.error
+                        .unwrap_or_else(|| "RA returned Success=false".to_string()),
+                ));
+            }
             if let Some(data) = resp.data {
                 return Self::from_patch(&data);
             }
@@ -556,5 +564,52 @@ mod tests {
         assert_eq!(game.console_id, 4);
         // game_id defaults to 0 when not available in PatchData.
         assert_eq!(game.game_id, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11: Stub RA response without Title — games without a full RA entry
+    // (e.g. Road Rash GB) return PatchData missing scalar fields. Parsing must
+    // succeed so the UI can render "no achievements" instead of erroring.
+    // -----------------------------------------------------------------------
+
+    const STUB_NO_TITLE: &str = r#"{
+        "Success": true,
+        "PatchData": {
+            "ID": 12345,
+            "ConsoleID": 4,
+            "ImageIcon": "",
+            "ImageIconURL": "",
+            "RichPresencePatch": "",
+            "Achievements": [],
+            "Leaderboards": []
+        }
+    }"#;
+
+    #[test]
+    fn stub_patch_missing_title_parses() {
+        let game = LoadedGame::from_patch_json(STUB_NO_TITLE).unwrap();
+        assert_eq!(game.title, "");
+        assert_eq!(game.console_id, 4);
+        assert!(game.achievements.is_empty());
+        assert!(game.leaderboards.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12: Success=false envelope must surface as a LoadError, not a
+    // silently-empty LoadedGame.
+    // -----------------------------------------------------------------------
+
+    const ERROR_ENVELOPE: &str = r#"{
+        "Success": false,
+        "Error": "Unknown game"
+    }"#;
+
+    #[test]
+    fn success_false_returns_error() {
+        let err = LoadedGame::from_patch_json(ERROR_ENVELOPE).unwrap_err();
+        match err {
+            LoadError::Json(msg) => assert!(msg.contains("Unknown game"), "got: {msg}"),
+            other => panic!("expected LoadError::Json, got {other:?}"),
+        }
     }
 }

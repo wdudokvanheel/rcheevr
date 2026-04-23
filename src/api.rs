@@ -115,20 +115,26 @@ pub mod patch {
     }
 
     /// The full game patch data returned by the `patch` endpoint.
-    #[derive(Serialize, Deserialize, Debug, Clone)]
+    ///
+    /// Every field defaults. RA returns stub responses for games without a
+    /// full entry (e.g. Road Rash GB): `PatchData` with no `Title`, empty
+    /// achievement/leaderboard arrays, and occasionally missing `ImageIcon`
+    /// or `RichPresencePatch`. Defaulting keeps parsing non-fatal so the UI
+    /// can render "no achievements" instead of erroring.
+    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
     pub struct PatchData {
-        #[serde(rename = "Title")]
+        #[serde(rename = "Title", default)]
         pub title: String,
-        #[serde(rename = "ImageIcon")]
+        #[serde(rename = "ImageIcon", default)]
         pub image_icon: String,
-        #[serde(rename = "ConsoleID")]
+        #[serde(rename = "ConsoleID", default)]
         pub console_id: u32,
         /// The game's rich-presence script (may be empty string).
-        #[serde(rename = "RichPresencePatch")]
+        #[serde(rename = "RichPresencePatch", default)]
         pub rich_presence_patch: String,
-        #[serde(rename = "Achievements")]
+        #[serde(rename = "Achievements", default)]
         pub achievements: Vec<AchievementDef>,
-        #[serde(rename = "Leaderboards")]
+        #[serde(rename = "Leaderboards", default)]
         pub leaderboards: Vec<LeaderboardDef>,
     }
 
