@@ -27,7 +27,11 @@ const INTEGRATION_ID: &str = "RALibretro";
 /// Active user session.
 #[derive(Debug, Clone)]
 pub struct Session {
+    /// Canonical RA username (the `u` field RA expects in API calls and in
+    /// the `awardachievement` validation hash). Distinct from `display_name`
+    /// for users who have customised the latter.
     pub user: String,
+    pub display_name: Option<String>,
     pub token: String,
     pub score: u32,
     pub softcore_score: u32,
@@ -224,7 +228,8 @@ impl<H: HttpTransport> AchievementRuntime<H> {
             .ok_or_else(|| RuntimeError::InvalidResponse("missing login data".to_string()))?;
 
         *session_slot = Some(Session {
-            user: data.display_name.unwrap_or_else(|| data.user.clone()),
+            user: data.user.clone(),
+            display_name: data.display_name.clone(),
             token: data.token.clone(),
             score: data.score,
             softcore_score: data.softcore_score,
@@ -450,6 +455,14 @@ impl<H: HttpTransport> AchievementRuntime<H> {
         let mut retry_awards = Vec::new();
         for info in pending_awards {
             let id_str = info.id.to_string();
+            // RA validates the request with `v = md5(<id><user><id>)`, where
+            // the user is the canonical username (not the display name).
+            // Missing or wrong `v` is silently rejected, which is why an
+            // unlock can fire locally but never register on the site.
+            let validation = crate::hash::md5_hex_str(&format!(
+                "{}{}{}",
+                id_str, user, id_str
+            ));
             let award_form = [
                 ("r", "awardachievement"),
                 ("u", user.as_str()),
@@ -457,6 +470,7 @@ impl<H: HttpTransport> AchievementRuntime<H> {
                 ("a", id_str.as_str()),
                 ("h", hardcore_val),
                 ("m", info.rom_hash.as_str()),
+                ("v", validation.as_str()),
             ];
             let award_result = async {
                 let bytes = self.http.post_form(&url, &award_form).await?;
@@ -777,7 +791,8 @@ mod tests {
         let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
         let sess = rt.login_password("testuser", "pass").await.unwrap();
 
-        assert_eq!(sess.user, "Test User");
+        assert_eq!(sess.user, "testuser");
+        assert_eq!(sess.display_name.as_deref(), Some("Test User"));
         assert_eq!(sess.token, "mytoken");
         assert_eq!(sess.score, 500);
         assert_eq!(sess.softcore_score, 100);

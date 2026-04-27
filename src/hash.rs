@@ -11,6 +11,12 @@ fn md5_hex(rom: &[u8]) -> String {
     format!("{digest:x}")
 }
 
+/// Compute the lowercase hex MD5 of a UTF-8 string. Used by the API client
+/// for the `awardachievement` / `submitlbentry` validation hashes.
+pub(crate) fn md5_hex_str(s: &str) -> String {
+    md5_hex(s.as_bytes())
+}
+
 /// Hash a Game Boy ROM for RetroAchievements lookup.
 ///
 /// Returns a 32-character lowercase hex MD5 string.
