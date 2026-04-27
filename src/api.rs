@@ -220,6 +220,42 @@ pub mod startsession {
 }
 
 // ---------------------------------------------------------------------------
+// unlocks
+// ---------------------------------------------------------------------------
+
+pub mod unlocks {
+    use serde::{Deserialize, Serialize};
+
+    /// Form fields for the `unlocks` endpoint. Returns the user's unlocked
+    /// achievement IDs for a given game without starting a session — cheaper
+    /// than `startsession` and safe to poll for library-wide summaries.
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct UnlocksRequest {
+        #[serde(rename = "u")]
+        pub user: String,
+        #[serde(rename = "t")]
+        pub token: String,
+        #[serde(rename = "g")]
+        pub game_id: u64,
+        /// 1 = hardcore unlocks only, 0 = softcore (which includes hardcore).
+        #[serde(rename = "h")]
+        pub hardcore: u8,
+    }
+
+    /// Response payload for `unlocks`. `user_unlocks` is a flat list of
+    /// achievement IDs (no nested structure).
+    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+    pub struct UnlocksData {
+        #[serde(rename = "UserUnlocks", default)]
+        pub user_unlocks: Vec<u64>,
+        #[serde(rename = "GameID", default)]
+        pub game_id: u64,
+        #[serde(rename = "HardcoreMode", default)]
+        pub hardcore_mode: bool,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ping
 // ---------------------------------------------------------------------------
 
@@ -457,6 +493,35 @@ mod tests {
         assert_eq!(data.hardcore_unlocks.len(), 2);
         assert_eq!(data.unlocks.len(), 3);
         assert_eq!(data.unlocks[2].id, 3);
+    }
+
+    // -- unlocks --
+
+    #[test]
+    fn unlocks_response_roundtrip() {
+        let json = r#"{
+            "Success": true,
+            "UserUnlocks": [1, 2, 3, 42],
+            "GameID": 1234,
+            "HardcoreMode": false
+        }"#;
+
+        let resp: RaResponse<unlocks::UnlocksData> = serde_json::from_str(json).unwrap();
+        assert!(resp.success);
+        let data = resp.data.unwrap();
+        assert_eq!(data.user_unlocks, vec![1, 2, 3, 42]);
+        assert_eq!(data.game_id, 1234);
+        assert!(!data.hardcore_mode);
+    }
+
+    #[test]
+    fn unlocks_empty_defaults() {
+        // RA returns no UserUnlocks field at all for games with zero unlocks.
+        let json = r#"{ "Success": true, "GameID": 99 }"#;
+        let resp: RaResponse<unlocks::UnlocksData> = serde_json::from_str(json).unwrap();
+        let data = resp.data.unwrap();
+        assert!(data.user_unlocks.is_empty());
+        assert_eq!(data.game_id, 99);
     }
 
     // -- awardachievement --

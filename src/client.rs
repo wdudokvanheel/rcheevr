@@ -639,6 +639,44 @@ impl<H: HttpTransport> AchievementRuntime<H> {
     }
 
     // ------------------------------------------------------------------
+    // fetch_unlocks
+    // ------------------------------------------------------------------
+
+    /// Fetch the user's unlocked achievement IDs for `game_id` without
+    /// starting a session. Used by library-wide summaries (e.g. an
+    /// "Achievements" page that lists unlocks across every game) where
+    /// pinging the game-session endpoints would be wasteful and would also
+    /// advance `startsession` tracking that only belongs to an active
+    /// playthrough.
+    ///
+    /// Respects the runtime's current `hardcore` flag. In softcore mode RA
+    /// returns the union of softcore + hardcore unlocks; in hardcore mode it
+    /// returns hardcore-only.
+    ///
+    /// Requires a prior [`login_password`](Self::login_password) or
+    /// [`login_token`](Self::login_token) — returns [`RuntimeError::NotLoggedIn`]
+    /// otherwise.
+    pub async fn fetch_unlocks(&mut self, game_id: u64) -> Result<Vec<u64>, RuntimeError> {
+        let session = self.session.as_ref().ok_or(RuntimeError::NotLoggedIn)?;
+        let user = session.user.clone();
+        let token = session.token.clone();
+        let url = self.base_url.clone();
+        let hardcore_val = if self.hardcore { "1" } else { "0" };
+        let game_id_str = game_id.to_string();
+
+        let form = [
+            ("r", "unlocks"),
+            ("u", user.as_str()),
+            ("t", token.as_str()),
+            ("g", game_id_str.as_str()),
+            ("h", hardcore_val),
+        ];
+        let bytes = self.http.post_form(&url, &form).await?;
+        let data = Self::parse_response::<api::unlocks::UnlocksData>(&bytes, "unlocks")?;
+        Ok(data.user_unlocks)
+    }
+
+    // ------------------------------------------------------------------
     // drain_events
     // ------------------------------------------------------------------
 
@@ -1357,5 +1395,82 @@ mod tests {
             )),
             "expected WarningPseudoAchievement in warnings"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // fetch_unlocks
+    // -----------------------------------------------------------------------
+
+    fn unlocks_resp(ids: &[u64], game_id: u64, hardcore: bool) -> serde_json::Value {
+        json!({
+            "Success": true,
+            "UserUnlocks": ids,
+            "GameID": game_id,
+            "HardcoreMode": hardcore,
+        })
+    }
+
+    #[tokio::test]
+    async fn fetch_unlocks_requires_login() {
+        let t = MockTransport::new();
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+
+        let err = rt.fetch_unlocks(42).await.unwrap_err();
+        assert!(matches!(err, RuntimeError::NotLoggedIn));
+    }
+
+    #[tokio::test]
+    async fn fetch_unlocks_happy_path() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        t.expect_json(
+            "",
+            &[("r", "unlocks"), ("g", "42"), ("h", "0")],
+            unlocks_resp(&[1, 2, 3], 42, false),
+        );
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.login_password("testuser", "pass").await.unwrap();
+
+        let ids = rt.fetch_unlocks(42).await.unwrap();
+        assert_eq!(ids, vec![1, 2, 3]);
+
+        rt.http
+            .assert_called("", &[("r", "unlocks"), ("g", "42"), ("h", "0")]);
+    }
+
+    #[tokio::test]
+    async fn fetch_unlocks_hardcore_flag_forwarded() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        t.expect_json(
+            "",
+            &[("r", "unlocks"), ("g", "7"), ("h", "1")],
+            unlocks_resp(&[9], 7, true),
+        );
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.set_hardcore(true);
+        rt.login_password("testuser", "pass").await.unwrap();
+
+        let ids = rt.fetch_unlocks(7).await.unwrap();
+        assert_eq!(ids, vec![9]);
+    }
+
+    #[tokio::test]
+    async fn fetch_unlocks_api_error_surfaces() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        t.expect_json(
+            "",
+            &[("r", "unlocks")],
+            json!({ "Success": false, "Error": "token expired" }),
+        );
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.login_password("testuser", "pass").await.unwrap();
+
+        let err = rt.fetch_unlocks(42).await.unwrap_err();
+        assert!(matches!(err, RuntimeError::Api(msg) if msg.contains("token expired")));
     }
 }
