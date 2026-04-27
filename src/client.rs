@@ -13,6 +13,7 @@ use crate::http::{HttpTransport, TransportError};
 use crate::leaderboard::{eval_leaderboard, LeaderboardEvent, LeaderboardState};
 use crate::memaddr::MemSize;
 use crate::patch::{LoadError, LoadedGame};
+use crate::richpresence::RichPresenceState;
 use serde::de::DeserializeOwned;
 
 /// Emulator integration identifier sent with `startsession`.
@@ -59,6 +60,7 @@ struct RuntimeGame {
     /// `true` once an achievement has been unlocked this session (no re-award).
     unlocked: Vec<bool>,
     leaderboard_states: Vec<LeaderboardState>,
+    rp_state: RichPresenceState,
     last_rich_presence: String,
     ping_counter: u32,
     rom_hash: String,
@@ -299,18 +301,28 @@ impl<H: HttpTransport> AchievementRuntime<H> {
         let mut loaded = LoadedGame::from_patch_json(patch_json).map_err(RuntimeError::Load)?;
         loaded.game_id = game_id as u32;
 
-        // Emit warnings for RA pseudo-achievements (e.g. "hardcore mode disabled").
+        // Emit warnings for RA pseudo-achievements and for non-fatal load
+        // failures (e.g. broken rich-presence scripts).
         for w in &loaded.warnings {
-            if let crate::patch::LoadWarning::WarningPseudoAchievement {
-                title,
-                description,
-                ..
-            } = w
-            {
-                eprintln!("[rcheevr] WARNING: RA pseudo-achievement filtered: {title} — {description}");
-                self.events.push(AchievementEvent::ServerError(format!(
-                    "RA warning: {title} — {description}"
-                )));
+            match w {
+                crate::patch::LoadWarning::WarningPseudoAchievement {
+                    title,
+                    description,
+                    ..
+                } => {
+                    eprintln!("[rcheevr] WARNING: RA pseudo-achievement filtered: {title} — {description}");
+                    self.events.push(AchievementEvent::ServerError(format!(
+                        "RA warning: {title} — {description}"
+                    )));
+                }
+                crate::patch::LoadWarning::RichPresenceSkipped(err) => {
+                    eprintln!(
+                        "[rcheevr] WARNING: rich-presence script failed to parse \
+                         (line {}): {}",
+                        err.line, err.msg
+                    );
+                }
+                _ => {}
             }
         }
 
@@ -358,11 +370,14 @@ impl<H: HttpTransport> AchievementRuntime<H> {
             .map(|lb| LeaderboardState::for_leaderboard(&lb.ast))
             .collect();
 
+        let rp_state = RichPresenceState::for_script(&loaded.rich_presence);
+
         self.game = Some(RuntimeGame {
             loaded,
             achievement_states,
             unlocked,
             leaderboard_states,
+            rp_state,
             last_rich_presence: String::new(),
             ping_counter: 0,
             rom_hash,
@@ -577,7 +592,7 @@ impl<H: HttpTransport> AchievementRuntime<H> {
         let rp = game
             .loaded
             .rich_presence
-            .render(|addr| peek(addr, MemSize::Byte));
+            .render_with(&mut game.rp_state, &mut peek);
         game.last_rich_presence = rp;
 
         // ------------------------------------------------------------------

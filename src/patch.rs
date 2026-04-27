@@ -71,6 +71,10 @@ pub enum LoadWarning {
         title: String,
         description: String,
     },
+    /// The rich-presence script failed to parse. Achievements and leaderboards
+    /// still load; `RichPresence::default()` replaces the script so in-game
+    /// presence strings are simply empty.
+    RichPresenceSkipped(RichPresenceParseError),
 }
 
 /// Error returned when converting a patch payload into a `LoadedGame`.
@@ -185,9 +189,16 @@ impl LoadedGame {
             }
         }
 
-        // Parse rich presence script.
-        let rich_presence =
-            RichPresence::parse(&data.rich_presence_patch).map_err(LoadError::RichPresence)?;
+        // Parse rich presence script. A parse failure is non-fatal — record
+        // it as a warning and fall back to an empty script so achievements
+        // and leaderboards still load.
+        let rich_presence = match RichPresence::parse(&data.rich_presence_patch) {
+            Ok(rp) => rp,
+            Err(e) => {
+                warnings.push(LoadWarning::RichPresenceSkipped(e));
+                RichPresence::default()
+            }
+        };
 
         Ok(LoadedGame {
             // game_id is not carried inside PatchData; default to 0.

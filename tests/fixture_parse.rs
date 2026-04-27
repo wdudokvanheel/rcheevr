@@ -8,6 +8,7 @@
 
 use rcheevr::condition::Achievement;
 use rcheevr::leaderboard::Leaderboard;
+use rcheevr::richpresence::RichPresence;
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
@@ -28,6 +29,8 @@ struct PatchData {
     achievements: Vec<AchievementDef>,
     #[serde(rename = "Leaderboards")]
     leaderboards: Vec<LeaderboardDef>,
+    #[serde(rename = "RichPresencePatch", default)]
+    rich_presence_patch: String,
 }
 
 #[derive(Deserialize)]
@@ -241,4 +244,35 @@ fn parse_all_achievements_stats() {
         core_fail, 0,
         "{core_fail} core achievements failed to parse"
     );
+}
+
+/// Parse the rich-presence script bundled with each fixture. Each is
+/// production data and exercises the full @Name(...) macro grammar plus
+/// trigger-based display conditions.
+#[test]
+fn parse_all_rich_presence() {
+    let fixtures = [
+        "sml_patch.json",
+        "pokemon_red_patch.json",
+        "kirby_patch.json",
+    ];
+    for fixture in &fixtures {
+        let pd = load_fixture(fixture);
+        let rp = RichPresence::parse(&pd.rich_presence_patch).unwrap_or_else(|e| {
+            panic!(
+                "rich presence parse failed for {fixture} ({}): {e:?}",
+                pd.title
+            )
+        });
+        assert!(
+            !rp.display.is_empty(),
+            "{fixture} ({}): no display lines parsed",
+            pd.title
+        );
+        eprintln!(
+            "{fixture}: parsed {} macros, {} display lines",
+            rp.macros.len(),
+            rp.display.len()
+        );
+    }
 }
