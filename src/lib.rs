@@ -11,6 +11,7 @@ pub mod leaderboard;
 pub mod memaddr;
 pub mod patch;
 pub mod richpresence;
+pub mod snapshot;
 
 pub use client::AchievementRuntime;
 pub use events::AchievementEvent;

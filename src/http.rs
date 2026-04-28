@@ -27,6 +27,18 @@ pub enum TransportError {
 // HttpTransport trait
 // ---------------------------------------------------------------------------
 
+/// Boxed future returned by [`HttpTransport::post_form`].
+///
+/// On native targets we require `+ Send` so the achievement runtime can be
+/// driven from a multi-thread Tokio runtime (the iOS / desktop FFI spawns
+/// per-frame evaluation tasks). On wasm we drop the bound — `web_sys`
+/// request/response types are deliberately `!Send`, and wasm is
+/// single-threaded anyway, so `Send` would be both unsatisfiable and
+/// pointless there.
+#[cfg(not(target_arch = "wasm32"))]
+pub type TransportFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
 pub type TransportFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + 'a>>;
 
 /// Async HTTP transport. One method: POST form-urlencoded, return bytes.
