@@ -8,6 +8,7 @@ use crate::api::RaResponse;
 use crate::condition::{Achievement, ConditionParseError};
 use crate::leaderboard::{Leaderboard, ValueFormat};
 use crate::richpresence::{RichPresence, RichPresenceParseError};
+use serde::Serialize;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -47,6 +48,25 @@ pub struct LoadedAchievement {
 #[derive(Debug, Clone)]
 pub struct LoadedLeaderboard {
     pub ast: Leaderboard,
+}
+
+/// JSON-friendly view of a single achievement combined with its current
+/// per-session unlock state. Produced by
+/// [`AchievementRuntime::achievements_summary`](crate::AchievementRuntime::achievements_summary)
+/// for UI surfaces (web frontend, iOS app) that want a flat, serialisable
+/// shape rather than the AST-bearing [`LoadedAchievement`].
+#[derive(Debug, Clone, Serialize)]
+pub struct AchievementSummary {
+    pub id: u32,
+    pub title: String,
+    pub description: String,
+    pub points: u32,
+    /// Fully-qualified RA badge URL derived from `badge_name`.
+    pub image_url: String,
+    pub author: String,
+    /// RA flags field: 3 = Core, 5 = Unofficial.
+    pub flags: u32,
+    pub unlocked: bool,
 }
 
 /// Non-fatal issues encountered while loading a patch.

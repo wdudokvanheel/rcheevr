@@ -12,7 +12,7 @@ use crate::hash::hash_gb;
 use crate::http::{HttpTransport, TransportError};
 use crate::leaderboard::{eval_leaderboard, LeaderboardEvent, LeaderboardState};
 use crate::memaddr::MemSize;
-use crate::patch::{LoadError, LoadedGame};
+use crate::patch::{AchievementSummary, LoadError, LoadedGame};
 use crate::richpresence::RichPresenceState;
 use serde::de::DeserializeOwned;
 
@@ -164,6 +164,33 @@ impl<H: HttpTransport> AchievementRuntime<H> {
             .as_ref()
             .and_then(|g| g.unlocked.get(index).copied())
             .unwrap_or(false)
+    }
+
+    /// Snapshot the loaded game's achievements as flat, serialisable views
+    /// suitable for handing to a UI (web frontend, iOS app, FFI consumer).
+    /// Returns an empty vector when no game is loaded.
+    pub fn achievements_summary(&self) -> Vec<AchievementSummary> {
+        let Some(game) = self.game.as_ref() else {
+            return Vec::new();
+        };
+        game.loaded
+            .achievements
+            .iter()
+            .enumerate()
+            .map(|(idx, a)| AchievementSummary {
+                id: a.id,
+                title: a.title.clone(),
+                description: a.description.clone(),
+                points: a.points,
+                image_url: format!(
+                    "https://media.retroachievements.org/Badge/{}.png",
+                    a.badge_name
+                ),
+                author: a.author.clone(),
+                flags: a.flags,
+                unlocked: game.unlocked.get(idx).copied().unwrap_or(false),
+            })
+            .collect()
     }
 
     pub fn rich_presence(&self) -> &str {
@@ -394,18 +421,115 @@ impl<H: HttpTransport> AchievementRuntime<H> {
     }
 
     // ------------------------------------------------------------------
-    // peek_from — per-frame driver
+    // Per-frame driver: split into a synchronous `evaluate` (cheap, runs
+    // every frame) and an async `flush` (network I/O, can be spawned).
+    //
+    // `peek_from(F)` and `peek_from_snapshot` keep their previous behaviour
+    // by chaining the two together — existing callers don't need to change.
     // ------------------------------------------------------------------
 
-    /// Drive one emulator frame.
+    /// Synchronously drive one frame: evaluate achievements and leaderboards,
+    /// render rich presence, and queue any HTTP-bound work (awards,
+    /// leaderboard submits, ping). Cheap; safe to call every frame.
     ///
-    /// `peek` must be a side-effect-free closure that reads memory from the
-    /// emulator core: `peek(address, size) -> value`.
-    pub async fn peek_from<F: FnMut(u32, MemSize) -> u32>(&mut self, mut peek: F) {
-        if self.game.is_none() {
+    /// `LeaderboardStarted` / `LeaderboardCancelled` events are emitted
+    /// here. `Unlocked` and `LeaderboardSubmitted` events are emitted from
+    /// [`flush`](Self::flush) once the server confirms.
+    ///
+    /// No-op when no game is loaded or no session is active.
+    pub fn evaluate<F: FnMut(u32, MemSize) -> u32>(&mut self, mut peek: F) {
+        if self.game.is_none() || self.session.is_none() {
             return;
         }
 
+        let game = self.game.as_mut().unwrap();
+        let rom_hash = game.rom_hash.clone();
+
+        let mut new_awards: Vec<PendingAward> = Vec::new();
+        for idx in 0..game.loaded.achievements.len() {
+            if game.unlocked[idx] {
+                continue;
+            }
+            let triggered = eval_achievement(
+                &game.loaded.achievements[idx].ast,
+                &mut game.achievement_states[idx],
+                &mut peek,
+            );
+            if triggered {
+                let ach = &game.loaded.achievements[idx];
+                new_awards.push(PendingAward {
+                    idx,
+                    id: ach.id,
+                    title: ach.title.clone(),
+                    points: ach.points,
+                    icon_url: format!(
+                        "https://media.retroachievements.org/Badge/{}.png",
+                        ach.badge_name
+                    ),
+                    rom_hash: rom_hash.clone(),
+                });
+            }
+        }
+        game.pending_awards.extend(new_awards);
+
+        let mut started_or_cancelled: Vec<AchievementEvent> = Vec::new();
+        let mut new_submits: Vec<PendingLeaderboardSubmit> = Vec::new();
+        for idx in 0..game.loaded.leaderboards.len() {
+            let event = eval_leaderboard(
+                &game.loaded.leaderboards[idx].ast,
+                &mut game.leaderboard_states[idx],
+                &mut peek,
+            );
+            match event {
+                Some(LeaderboardEvent::Started(id)) => {
+                    started_or_cancelled.push(AchievementEvent::LeaderboardStarted(id));
+                }
+                Some(LeaderboardEvent::Cancelled(id)) => {
+                    started_or_cancelled.push(AchievementEvent::LeaderboardCancelled(id));
+                }
+                Some(LeaderboardEvent::Submitted { id, value }) => {
+                    new_submits.push(PendingLeaderboardSubmit {
+                        id,
+                        value,
+                        rom_hash: rom_hash.clone(),
+                    });
+                }
+                None => {}
+            }
+        }
+        game.pending_lb_submits.extend(new_submits);
+
+        let rp = game
+            .loaded
+            .rich_presence
+            .render_with(&mut game.rp_state, &mut peek);
+        game.last_rich_presence = rp;
+
+        game.ping_counter += 1;
+
+        // Push the synchronous events last so they appear in `drain_events`
+        // alongside anything `flush` produces in the same frame.
+        self.events.extend(started_or_cancelled);
+    }
+
+    /// Synchronous snapshot variant of [`evaluate`](Self::evaluate). See
+    /// [`peek_from_snapshot`](Self::peek_from_snapshot) for `base_addr`
+    /// semantics.
+    pub fn evaluate_from_snapshot(&mut self, snapshot: &[u8], base_addr: u32) {
+        self.evaluate(|addr, size| {
+            crate::snapshot::read_snapshot(snapshot, addr, size, base_addr)
+        });
+    }
+
+    /// Drive any HTTP work queued by [`evaluate`](Self::evaluate): post
+    /// pending awards, submit leaderboard entries, and ping when due.
+    /// Failed requests are kept in the queue and retried on the next call.
+    ///
+    /// No-op when no game is loaded or no session is active.
+    pub async fn flush(&mut self) {
+        if self.game.is_none() {
+            return;
+        }
         let session = match &self.session {
             Some(s) => (s.user.clone(), s.token.clone()),
             None => return,
@@ -414,40 +538,7 @@ impl<H: HttpTransport> AchievementRuntime<H> {
         let url = self.base_url.clone();
         let hardcore_val = if self.hardcore { "1" } else { "0" };
 
-        // ------------------------------------------------------------------
-        // Evaluate achievements.
-        // Collect triggered info first, then do HTTP (avoids split-borrow issues).
-        // ------------------------------------------------------------------
-        let mut awards: Vec<PendingAward> = Vec::new();
-        {
-            let game = self.game.as_mut().unwrap();
-            for idx in 0..game.loaded.achievements.len() {
-                if game.unlocked[idx] {
-                    continue;
-                }
-                let triggered = eval_achievement(
-                    &game.loaded.achievements[idx].ast,
-                    &mut game.achievement_states[idx],
-                    &mut peek,
-                );
-                if triggered {
-                    let ach = &game.loaded.achievements[idx];
-                    awards.push(PendingAward {
-                        idx,
-                        id: ach.id,
-                        title: ach.title.clone(),
-                        points: ach.points,
-                        icon_url: format!(
-                            "https://media.retroachievements.org/Badge/{}.png",
-                            ach.badge_name
-                        ),
-                        rom_hash: game.rom_hash.clone(),
-                    });
-                }
-            }
-            game.pending_awards.extend(awards);
-        }
-
+        // ----- Award achievements. -----
         let pending_awards = {
             let game = self.game.as_mut().unwrap();
             std::mem::take(&mut game.pending_awards)
@@ -508,48 +599,7 @@ impl<H: HttpTransport> AchievementRuntime<H> {
                 .extend(retry_awards);
         }
 
-        // ------------------------------------------------------------------
-        // Evaluate leaderboards.
-        // Collect events first, then do HTTP.
-        // ------------------------------------------------------------------
-        let mut lb_events: Vec<LeaderboardEvent> = Vec::new();
-        let mut lb_submits: Vec<PendingLeaderboardSubmit> = Vec::new();
-        {
-            let game = self.game.as_mut().unwrap();
-            let rom_hash = game.rom_hash.clone();
-            for idx in 0..game.loaded.leaderboards.len() {
-                let event = eval_leaderboard(
-                    &game.loaded.leaderboards[idx].ast,
-                    &mut game.leaderboard_states[idx],
-                    &mut peek,
-                );
-                if let Some(ev) = event {
-                    if let LeaderboardEvent::Submitted { id, value } = ev {
-                        lb_submits.push(PendingLeaderboardSubmit {
-                            id,
-                            value,
-                            rom_hash: rom_hash.clone(),
-                        });
-                    } else {
-                        lb_events.push(ev);
-                    }
-                }
-            }
-            game.pending_lb_submits.extend(lb_submits);
-        }
-
-        for event in lb_events {
-            match event {
-                LeaderboardEvent::Started(id) => {
-                    self.events.push(AchievementEvent::LeaderboardStarted(id));
-                }
-                LeaderboardEvent::Cancelled(id) => {
-                    self.events.push(AchievementEvent::LeaderboardCancelled(id));
-                }
-                LeaderboardEvent::Submitted { .. } => unreachable!("submits are queued"),
-            }
-        }
-
+        // ----- Submit leaderboard entries. -----
         let pending_lb_submits = {
             let game = self.game.as_mut().unwrap();
             std::mem::take(&mut game.pending_lb_submits)
@@ -599,24 +649,20 @@ impl<H: HttpTransport> AchievementRuntime<H> {
                 .extend(retry_lb_submits);
         }
 
-        // ------------------------------------------------------------------
-        // Update rich presence.
-        // ------------------------------------------------------------------
-        let game = self.game.as_mut().unwrap();
-        let rp = game
-            .loaded
-            .rich_presence
-            .render_with(&mut game.rp_state, &mut peek);
-        game.last_rich_presence = rp;
-
-        // ------------------------------------------------------------------
-        // Ping every ~120 frames.
-        // ------------------------------------------------------------------
-        game.ping_counter += 1;
-        if game.ping_counter >= 120 {
-            game.ping_counter = 0;
-            let game_id_str = game.loaded.game_id.to_string();
-            let rp_str = game.last_rich_presence.clone();
+        // ----- Ping every ~120 evaluations. -----
+        let ping_payload = {
+            let game = self.game.as_mut().unwrap();
+            if game.ping_counter >= 120 {
+                game.ping_counter = 0;
+                Some((
+                    game.loaded.game_id.to_string(),
+                    game.last_rich_presence.clone(),
+                ))
+            } else {
+                None
+            }
+        };
+        if let Some((game_id_str, rp_str)) = ping_payload {
             let ping_form = [
                 ("r", "ping"),
                 ("u", user.as_str()),
@@ -636,6 +682,36 @@ impl<H: HttpTransport> AchievementRuntime<H> {
                     .push(AchievementEvent::ServerError(format!("ping: {e:?}"))),
             }
         }
+    }
+
+    /// Drive one emulator frame using a flat memory snapshot.
+    ///
+    /// `snapshot` is a contiguous block of console memory starting at
+    /// `base_addr` (e.g. `0` for GB/NES, `0x02000000` for GBA, `0x7E0000`
+    /// for SNES WRAM). Multi-byte and big-endian reads, plus out-of-bounds
+    /// handling, are delegated to [`crate::snapshot::read_snapshot`] so every
+    /// frontend gets identical behaviour.
+    ///
+    /// Equivalent to [`evaluate_from_snapshot`](Self::evaluate_from_snapshot)
+    /// followed by [`flush`](Self::flush). Frontends that want to keep
+    /// network I/O off their per-frame thread should call those two
+    /// separately and spawn `flush` on their async runtime.
+    pub async fn peek_from_snapshot(&mut self, snapshot: &[u8], base_addr: u32) {
+        self.evaluate_from_snapshot(snapshot, base_addr);
+        self.flush().await;
+    }
+
+    /// Drive one emulator frame.
+    ///
+    /// `peek` must be a side-effect-free closure that reads memory from the
+    /// emulator core: `peek(address, size) -> value`.
+    ///
+    /// Equivalent to [`evaluate(peek)`](Self::evaluate) followed by
+    /// [`flush`](Self::flush) — kept for callers that don't need to
+    /// schedule the two halves independently.
+    pub async fn peek_from<F: FnMut(u32, MemSize) -> u32>(&mut self, peek: F) {
+        self.evaluate(peek);
+        self.flush().await;
     }
 
     // ------------------------------------------------------------------
@@ -877,6 +953,41 @@ mod tests {
     // -----------------------------------------------------------------------
     // Test 5: load_rom happy path → game populated.
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn achievements_summary_empty_before_load() {
+        let t = MockTransport::new();
+        let rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        assert!(rt.achievements_summary().is_empty());
+    }
+
+    #[tokio::test]
+    async fn achievements_summary_reflects_loaded_game_and_unlocks() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        queue_load_rom(&mut t, 42, patch_json_one_ach());
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
+
+        let summary = rt.achievements_summary();
+        assert_eq!(summary.len(), 1);
+        let a = &summary[0];
+        assert_eq!(a.id, 1);
+        assert_eq!(a.title, "First");
+        assert_eq!(a.points, 10);
+        assert!(!a.unlocked);
+        assert!(a.image_url.starts_with("https://media.retroachievements.org/Badge/"));
+        assert!(a.image_url.ends_with("00001.png"));
+
+        // Round-trips through serde to the wasm/iOS shape.
+        let v = serde_json::to_value(a).unwrap();
+        assert_eq!(v["id"], 1);
+        assert_eq!(v["unlocked"], false);
+        assert!(v.get("image_url").is_some());
+        assert!(v.get("badge_name").is_none());
+    }
 
     #[tokio::test]
     async fn load_rom_happy_path() {
@@ -1408,6 +1519,102 @@ mod tests {
             "GameID": game_id,
             "HardcoreMode": hardcore,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // evaluate / flush split
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn evaluate_alone_does_not_hit_http() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        queue_load_rom(&mut t, 42, patch_json_one_ach());
+        // No award expectation — strict mode would reject the call if
+        // evaluate did any HTTP.
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
+
+        // Frame 1: zeros — exits WAITING.
+        rt.evaluate(|_, _| 0);
+        // Frame 2: triggers — should queue an award but NOT post it.
+        rt.evaluate(|addr, _| if addr == 0xc0 { 1 } else { 0 });
+
+        // No Unlocked event yet — that comes from flush.
+        let events: Vec<_> = rt.drain_events().collect();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AchievementEvent::Unlocked { .. })),
+            "evaluate must not emit Unlocked before flush"
+        );
+
+        // No awardachievement HTTP call recorded yet.
+        let award_calls = rt
+            .http
+            .calls
+            .iter()
+            .filter(|c| {
+                c.form
+                    .iter()
+                    .any(|(k, v)| k == "r" && v == "awardachievement")
+            })
+            .count();
+        assert_eq!(award_calls, 0);
+    }
+
+    #[tokio::test]
+    async fn flush_drains_queue_built_by_evaluate() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        queue_load_rom(&mut t, 42, patch_json_one_ach());
+        t.expect_json("", &[("r", "awardachievement"), ("a", "1")], award_resp());
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
+
+        rt.evaluate(|_, _| 0);
+        rt.evaluate(|addr, _| if addr == 0xc0 { 1 } else { 0 });
+        rt.flush().await;
+
+        let events: Vec<_> = rt.drain_events().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AchievementEvent::Unlocked { id: 1, .. })),
+            "flush should emit Unlocked after server confirms"
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_from_snapshot_matches_closure_form() {
+        let mut t = MockTransport::new();
+        t.expect_json("", &[("r", "login2")], login_ok_resp());
+        queue_load_rom(&mut t, 42, patch_json_one_ach());
+        t.expect_json("", &[("r", "awardachievement"), ("a", "1")], award_resp());
+
+        let mut rt = AchievementRuntime::with_base_url(t, "http://mock/".to_string());
+        rt.login_password("testuser", "pass").await.unwrap();
+        rt.load_rom(b"rom").await.unwrap();
+
+        // Frame 1: all zeros.
+        let snapshot = vec![0u8; 0x1_0000];
+        rt.peek_from_snapshot(&snapshot, 0).await;
+        // Frame 2: 0xC0 = 1.
+        let mut snapshot = vec![0u8; 0x1_0000];
+        snapshot[0xC0] = 1;
+        rt.peek_from_snapshot(&snapshot, 0).await;
+
+        let events: Vec<_> = rt.drain_events().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AchievementEvent::Unlocked { id: 1, .. })),
+            "peek_from_snapshot should drive eval+flush identically to peek_from"
+        );
     }
 
     #[tokio::test]
